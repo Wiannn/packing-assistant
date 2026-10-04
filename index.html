@@ -1,100 +1,12 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta charset="UTF-8">
+<meta http-equiv="refresh" content="0; url=./%E8%A3%85%E7%AE%B1%E8%BD%AF%E4%BB%B6.html">
 <title>装箱辅助软件</title>
-<link rel="stylesheet" href="style.css" />
+<style>body{font-family:sans-serif;text-align:center;padding-top:40vh;color:#555}</style>
 </head>
 <body>
-  <div id="app">
-    <!-- 左侧控制面板 -->
-    <aside id="panel">
-      <section class="block">
-        <h2>集装箱</h2>
-        <div class="row">
-          <label>长(mm)<input type="number" id="cW" value="12000" min="1"></label>
-          <label>宽(mm)<input type="number" id="cD" value="2350" min="1"></label>
-          <label>高(mm)<input type="number" id="cH" value="2390" min="1"></label>
-        </div>
-        <button id="applyContainer" class="btn">应用集装箱尺寸</button>
-      </section>
-
-      <section class="block">
-        <h2>货物清单</h2>
-        <table id="cargoTable">
-          <thead>
-            <tr><th>名称</th><th>长</th><th>宽</th><th>高</th><th>数量</th><th>颜色</th><th></th></tr>
-          </thead>
-          <tbody id="cargoBody"></tbody>
-        </table>
-        <div class="row btns">
-          <button id="addCargo" class="btn">+ 添加货物</button>
-          <button id="autoPack" class="btn primary">自动装箱</button>
-          <button id="clearBox" class="btn">清空装箱</button>
-        </div>
-      </section>
-
-      <section class="block">
-        <h2>模式</h2>
-        <div class="row">
-          <label class="toggle"><input type="radio" name="mode" value="auto" checked> 自动模式</label>
-          <label class="toggle"><input type="radio" name="mode" value="manual"> 手动模式</label>
-        </div>
-        <p class="hint">手动模式：从左侧"待装箱"列表把货物拖进集装箱；点击货物可循环切换 90° 朝向。</p>
-        <div class="row btns">
-          <button id="addOneManual" class="btn">手动放入一件</button>
-          <button id="rotateSel" class="btn">旋转选中货物</button>
-          <button id="removeSel" class="btn">移除选中货物</button>
-        </div>
-      </section>
-
-      <section class="block">
-        <h2>统计</h2>
-        <div id="stats" class="stats">未装箱</div>
-      </section>
-
-      <section class="block">
-        <h2>逐步装车指引</h2>
-        <div class="row btns">
-          <button id="stepPrev" class="btn">上一步</button>
-          <button id="stepNext" class="btn">下一步</button>
-          <button id="stepReset" class="btn">重置</button>
-        </div>
-        <div id="stepInfo" class="hint"></div>
-      </section>
-
-      <section class="block">
-        <h2>方案</h2>
-        <div class="row btns">
-          <button id="exportPlan" class="btn">导出方案</button>
-          <label class="btn">导入方案<input type="file" id="importPlan" accept="application/json" hidden></label>
-        </div>
-      </section>
-    </aside>
-
-    <!-- 右侧 3D 视图 -->
-    <main id="viewer">
-      <div class="toolbar">
-        <span id="cursorInfo" class="hint">待装箱货物：0 / 已装箱：0</span>
-      </div>
-      <div id="pendingWrap" class="pending">
-        <div class="pending-title">待装箱货物（手动模式点击放入）</div>
-        <div id="pendingList"></div>
-      </div>
-      <canvas id="three-canvas"></canvas>
-    </main>
-  </div>
-
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-    }
-  }
-  </script>
-  <script type="module" src="js/packer.js?v=2"></script>
-  <script type="module" src="js/main.js?v=2"></script>
+<p>正在跳转至 <a href="./%E8%A3%85%E7%AE%B1%E8%BD%AF%E4%BB%B6.html">装箱软件</a>…</p>
 </body>
 </html>
