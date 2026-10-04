@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>装箱辅助软件</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 13px; color: #1f2329; background: #f5f6f7; }
+#app { display: flex; height: 100vh; width: 100vw; }
+#panel { width: 560px; min-width: 560px; height: 100%; overflow-y: auto; padding: 10px; background: #fff; border-right: 1px solid #e5e6eb; }
+.block { border: 1px solid #e5e6eb; border-radius: 6px; padding: 10px; margin-bottom: 10px; background: #fafbfc; }
+.block h2 { font-size: 13px; margin-bottom: 8px; color: #1d2129; border-left: 3px solid #165dff; padding-left: 6px; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.row.btns { margin-top: 6px; }
+.row label { display: flex; flex-direction: column; font-size: 11px; color: #4e5969; flex: 1; min-width: 70px; }
+.row label.toggle { flex-direction: row; align-items: center; gap: 4px; font-size: 12px; }
+input[type=number] { width: 100%; padding: 4px 6px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 12px; }
+input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 12px; }
+.btn { padding: 5px 10px; font-size: 12px; border: 1px solid #c9cdd4; background: #fff; border-radius: 4px; cursor: pointer; color: #1d2129; line-height: 1.4; }
+.btn:hover { border-color: #165dff; color: #165dff; }
+.btn.primary { background: #165dff; color: #fff; border-color: #165dff; }
+.btn.primary:hover { background: #0e4fd6; color: #fff; }
+.hint { font-size: 11px; color: #86909c; margin-top: 6px; line-height: 1.6; }
+#cargoTable { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: auto; }
+#cargoTable th, #cargoTable td { border: 1px solid #e5e6eb; padding: 3px 2px; text-align: center; white-space: nowrap; }
+#cargoTable input { width: 100%; border: none; text-align: center; background: transparent; font-size: 12px; min-width: 0; }
+#cargoTable select { width: 100%; border: none; text-align: center; background: transparent; font-size: 11px; padding: 2px; min-width: 0; }
+#cargoTable input[type=color] { width: 100%; height: 22px; padding: 0; }
+/* 隐藏货物清单数字输入框的上下箭头，保留可编辑 */
+#cargoTable input[type=number]::-webkit-inner-spin-button,
+#cargoTable input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+#cargoTable input[type=number] { -moz-appearance: textfield; }
+#cargoTable th { background: #f2f3f5; }
+/* 名称列固定为内容宽度（不吸收多余空间），其余列按 min-width 并吸收剩余宽度 */
+#cargoTable col.c-name { width: 1px; }
+#cargoTable col.c-cat { min-width: 56px; }
+#cargoTable col.c-dim { min-width: 40px; }
+#cargoTable col.c-qty { min-width: 36px; }
+#cargoTable col.c-color { min-width: 34px; }
+#cargoTable col.c-chk { min-width: 38px; }
+#cargoTable col.c-del { width: 30px; min-width: 30px; }
+.chk-cell { text-align: center; vertical-align: middle; }
+.chk-cell input[type=checkbox] { width: auto; }
+.stats { font-size: 12px; color: #4e5969; line-height: 1.7; }
+#viewer { flex: 1; position: relative; background: #e8eaf0; overflow: hidden; }
+#three-canvas { display: block; width: 100%; height: 100%; }
+.toolbar { position: absolute; top: 8px; left: 8px; z-index: 10; background: rgba(255,255,255,.85); padding: 4px 10px; border-radius: 4px; }
+.pending { position: absolute; top: 8px; right: 8px; z-index: 10; width: 180px; background: rgba(255,255,255,.9); border: 1px solid #e5e6eb; border-radius: 6px; padding: 6px; max-height: 60vh; overflow-y: auto; }
+.pending-title { font-size: 11px; color: #86909c; margin-bottom: 4px; }
+.pend-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px; font-size: 11px; border: 1px dashed #d9dce0; border-radius: 4px; margin-bottom: 3px; cursor: pointer; }
+.pend-item:hover { border-color: #165dff; background: #f2f7ff; }
+.pend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #999; flex: none; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="panel">
+    <section class="block">
+      <h2>集装箱</h2>
+      <div class="row">
+        <label>长(cm)<input type="number" id="cW" value="1200" min="1"></label>
+        <label>宽(cm)<input type="number" id="cD" value="235" min="1"></label>
+        <label>高(cm)<input type="number" id="cH" value="239" min="1"></label>
+      </div>
+      <div class="row btns">
+        <button id="applyContainer" class="btn">应用</button>
+        <button class="btn" data-preset="589,235,239">20GP</button>
+      </div>
+    </section>
+    <section class="block">
+      <h2>货物清单</h2>
+      <table id="cargoTable">
+        <colgroup>
+          <col class="c-name"><col class="c-cat"><col class="c-dim"><col class="c-dim"><col class="c-dim">
+          <col class="c-qty"><col class="c-color"><col class="c-chk"><col class="c-chk"><col class="c-chk"><col class="c-del">
+        </colgroup>
+        <thead><tr><th>名称</th><th>类别</th><th>长</th><th>宽</th><th>高</th><th>数量</th><th>颜色</th><th>可叠放</th><th>可承压</th><th>圆柱</th><th></th></tr></thead>
+        <tbody id="cargoBody"></tbody>
+      </table>
+      <div class="row btns">
+        <button id="addCargo" class="btn">+ 添加货物</button>
+        <button id="autoPack" class="btn primary">自动装箱</button>
+        <button id="clearBox" class="btn">清空装箱</button>
+      </div>
+    </section>
+    <section class="block">
+      <h2>模式</h2>
+      <div class="row">
+        <label class="toggle"><input type="radio" name="mode" value="auto" checked> 自动模式</label>
+        <label class="toggle"><input type="radio" name="mode" value="manual"> 手动模式</label>
+      </div>
+      <p class="hint">手动模式：从右侧"待装箱"列表点击货物放入；点击货物选中后可循环切换 90° 朝向；可直接拖拽货物调整位置。<br>「可叠放」= 能否放在别的货物上；「可承压」= 上面能否再放别的货物（重货/易碎品可取消勾选）。</p>
+      <div class="row btns">
+        <button id="rotateSel" class="btn">旋转选中货物</button>
+        <button id="removeSel" class="btn">移除选中货物</button>
+      </div>
+    </section>
+    <section class="block">
+      <h2>统计</h2>
+      <div id="stats" class="stats">未装箱</div>
+    </section>
+    <section class="block">
+      <h2>逐步装车指引</h2>
+      <div class="row btns">
+        <button id="stepPrev" class="btn">上一步</button>
+        <button id="stepNext" class="btn">下一步</button>
+        <button id="stepReset" class="btn">重置</button>
+      </div>
+      <div id="stepInfo" class="hint"></div>
+    </section>
+    <section class="block">
+      <h2>方案</h2>
+      <div class="row btns">
+        <button id="exportPlan" class="btn">导出方案</button>
+        <label class="btn">导入方案<input type="file" id="importPlan" accept="application/json" hidden></label>
+      </div>
+    </section>
+  </aside>
+  <main id="viewer">
+    <div class="toolbar"><span id="cursorInfo" class="hint">待装箱货物：0 / 已装箱：0</span></div>
+    <div id="pendingWrap" class="pending">
+      <div class="pending-title">待装箱货物（手动模式点击放入）</div>
+      <div id="pendingList"></div>
+    </div>
+    <canvas id="three-canvas"></canvas>
+  </main>
+</div>
+
+<!-- three.js UMD 版本（CDN，file:// 下可跨域加载 script） -->
+<script src="https://unpkg.com/three@0.137.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.137.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://unpkg.com/three@0.137.0/examples/js/controls/DragControls.js"></script>
+
+<!-- 装箱算法 -->
+<script>
+// 极值点法 + 6 种 90° 朝向枚举 + 支撑/碰撞检测
+function orientations(box) {
+  const a = [box.l, box.w, box.h];
+  const seen = new Set(); const out = [];
+  const perms = (arr) => arr.length === 1 ? [arr] : arr.flatMap((v, i) => perms(arr.slice(0, i).concat(arr.slice(i + 1))).map(t => [v, ...t]));
+  for (const p of perms([0, 1, 2])) {
+    const key = p.map(i => a[i]).join('-');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ l: a[p[0]], h: a[p[1]], w: a[p[2]] });
+  }
+  return out;
+}
+function overlap(a, b) {
+  return a.x < b.x + b.l - 1e-6 && a.x + a.l > b.x + 1e-6 &&
+         a.y < b.y + b.h - 1e-6 && a.y + a.h > b.y + 1e-6 &&
+         a.z < b.z + b.w - 1e-6 && a.z + a.w > b.z + 1e-6;
+}
+class Packer {
+  constructor(L, W, H) { this.L = L; this.W = W; this.H = H; }
+  // 6 种正交朝向（去重）
+  getOrientations(item) {
+    const { l, w, h } = item;
+    const perms = [[l, w, h], [l, h, w], [w, l, h], [w, h, l], [h, l, w], [h, w, l]];
+    const seen = new Set(), out = [];
+    for (const [a, b, c] of perms) {
+      const k = a + ',' + b + ',' + c;
+      if (!seen.has(k)) { seen.add(k); out.push({ l: a, w: b, h: c }); }
+    }
+    return out;
+  }
+  // 在 z-y 平面的指定 y 层，找能放下 o.w 宽的 z 空位
+  findAtY(o, used, y) {
+    const intervals = [];
+    for (const u of used) {
+      if (u.y < y + o.h - 1e-6 && u.y + u.h > y + 1e-6) {
+        intervals.push([u.z, u.z + u.w]);
+      }
+    }
+    intervals.sort((a, b) => a[0] - b[0]);
+    let curZ = 0;
+    for (const [s, e] of intervals) {
+      if (s - curZ >= o.w - 1e-6) return { z: curZ, y };
+      curZ = Math.max(curZ, e);
+    }
+    if (this.W - curZ >= o.w - 1e-6) return { z: curZ, y };
+    return null;
+  }
+  // 货架式二维装填：底层优先，z 从小到大；不可叠加货物只在 y=0 找
+  findShelfPosition(o, used, stackable) {
+    if (!stackable) return this.findAtY(o, used, 0);
+    const yLevels = new Set([0]);
+    for (const u of used) yLevels.add(u.y + u.h);
+    const sortedY = [...yLevels].sort((a, b) => a - b);
+    for (const y of sortedY) {
+      if (y + o.h > this.H + 1e-6) continue;
+      const pos = this.findAtY(o, used, y);
+      if (pos) return pos;
+    }
+    return null;
+  }
+  packAll(items) {
+    const flat = [];
+    for (const it of items) for (let i = 0; i < (it.qty || 1); i++) flat.push({ ...it, instanceId: it.id + '-' + i });
+    flat.sort((a, b) => (b.l * b.w * b.h) - (a.l * a.w * a.h));
+
+    const placed = [];
+    const remaining = [...flat];
+    let curX = this.L; // 当前墙面位置，从最深处（x=L）向门口（x=0）推进
+
+    while (remaining.length > 0 && curX > 1e-6) {
+      const wallPlaced = []; // 当前这面墙装入的货物
+      const used = [];       // 当前墙 z-y 平面已占用区域
+
+      // 反复尝试把剩余货物装入当前墙，直到装不下任何一件
+      let progress = true;
+      while (progress) {
+        progress = false;
+        for (let i = 0; i < remaining.length; i++) {
+          const it = remaining[i];
+          // 只尝试厚度 l <= curX 的朝向
+          const orients = this.getOrientations(it).filter(o => o.l <= curX + 1e-6);
+          let best = null;
+          for (const o of orients) {
+            const pos = this.findShelfPosition(o, used, it.stackable !== false);
+            if (pos) { best = { o, pos }; break; }
+          }
+          if (best) {
+            const { o, pos } = best;
+            wallPlaced.push({ item: it, z: pos.z, y: pos.y, l: o.l, w: o.w, h: o.h });
+            // canBearWeight=false 的货物也占位，上面自然放不了别的
+            used.push({ z: pos.z, y: pos.y, w: o.w, h: o.h });
+            remaining.splice(i, 1);
+            progress = true;
+            break; // 重新从体积最大的开始尝试
+          }
+        }
+      }
+
+      if (wallPlaced.length === 0) break;
+
+      // 同一面墙内按 y 升序（底层先装）、再 z 升序排列，符合装车顺序
+      wallPlaced.sort((a, b) => a.y - b.y || a.z - b.z);
+
+      // 这面墙的厚度 = 墙内最大 l，推进到下一面墙
+      const maxL = Math.max(...wallPlaced.map(w => w.l));
+      for (const w of wallPlaced) {
+        placed.push({
+          instanceId: w.item.instanceId, baseId: w.item.id,
+          name: w.item.name, category: w.item.category, color: w.item.color,
+          x: curX - w.l, y: w.y, z: w.z, l: w.l, w: w.w, h: w.h,
+          stackable: w.item.stackable !== false,
+          canBearWeight: w.item.canBearWeight !== false,
+          isCylinder: w.item.isCylinder === true,
+        });
+      }
+      curX -= maxL;
+    }
+
+    return { placed, unplaced: remaining };
+  }
+}
+</script>
+
+<!-- 主应用 -->
+<script>
+(function () {
+  const state = {
+    container: { L: 1200, W: 235, H: 239 },
+    cargoDef: [], placed: [], mode: 'auto', selected: null, stepIndex: 0, nextId: 1, nameSeq: 1,
+  };
+  const meshByInst = new Map();
+
+  const canvas = document.getElementById('three-canvas');
+  let renderer = null;
+  try {
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+  } catch (e) {
+    console.warn('WebGL 不可用，3D 渲染关闭，其它逻辑仍可用：', e.message);
+    const b = document.createElement('div');
+    b.style.cssText = 'position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:20;background:#fff3e0;border:1px solid #ffb665;color:#a64b00;padding:6px 12px;border-radius:4px;font-size:12px';
+    b.textContent = '当前浏览器不支持 WebGL，3D 无法渲染。装箱/统计/方案逻辑仍可用，但看不到 3D 画面。';
+    document.getElementById('viewer').appendChild(b);
+  }
+  const viewEl = renderer ? renderer.domElement : canvas;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xe8eaf0);
+  const camera = new THREE.PerspectiveCamera(50, 1, 1, 1_000_000);
+  const controls = new THREE.OrbitControls(camera, viewEl);
+  controls.enableDamping = true;
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.7);
+  dir.position.set(1, 2, 1); scene.add(dir);
+
+  let grid, containerMesh;
+  // 生成文字精灵（始终面向相机）
+  function makeTextSprite(text) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.font = 'bold 28px sans-serif';
+    ctx.fillStyle = '#ff7d00';
+    ctx.textAlign = 'center';
+    ctx.fillText(text, 128, 40);
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+    const sp = new THREE.Sprite(mat);
+    sp.scale.set(120, 30, 1);
+    return sp;
+  }
+  function buildContainer() {
+    if (grid) scene.remove(grid);
+    if (containerMesh) scene.remove(containerMesh);
+    const { L, W, H } = state.container;
+    grid = new THREE.GridHelper(Math.max(L, W) * 2, 40, 0x9aa3b2, 0xc9cdd4);
+    grid.position.set(L / 2, 0, W / 2);
+    scene.add(grid);
+    const geo = new THREE.BoxGeometry(L, H, W);
+    const edges = new THREE.EdgesGeometry(geo);
+    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x165dff }));
+    line.position.set(L / 2, H / 2, W / 2);
+    containerMesh = line;
+    scene.add(containerMesh);
+    const floorGeo = new THREE.PlaneGeometry(L, W);
+    const floor = new THREE.Mesh(floorGeo, new THREE.MeshBasicMaterial({ color: 0xb6c6e8, transparent: true, opacity: 0.3, side: THREE.DoubleSide }));
+    floor.rotation.x = -Math.PI / 2;
+    // containerMesh 已定位在 (L/2, H/2, W/2)，子对象用局部坐标：地面 y=0 → 局部 y=-H/2
+    floor.position.set(0, -H / 2, 0);
+    floor.name = 'floor';
+    containerMesh.add(floor);
+    // 门口标识：x=0 端面（宽×高），橙色半透明面标出铲车进出方向
+    const doorGeo = new THREE.PlaneGeometry(W, H);
+    const door = new THREE.Mesh(doorGeo, new THREE.MeshBasicMaterial({ color: 0xff7d00, transparent: true, opacity: 0.25, side: THREE.DoubleSide }));
+    door.rotation.y = -Math.PI / 2;
+    // 局部 x=-L/2 → 世界 x=0（集装箱端面）；平面覆盖世界 y:[0,H], z:[0,W]
+    door.position.set(-L / 2, 0, 0);
+    door.name = 'door';
+    containerMesh.add(door);
+    // 门口文字标签
+    const doorLabel = makeTextSprite('门');
+    doorLabel.position.set(-L / 2, H / 2 + 15, 0);
+    containerMesh.add(doorLabel);
+    const d = Math.max(L, W, H) * 1.6;
+    camera.position.set(L * 0.9, H * 1.8, W * 1.5 + d * 0.4);
+    controls.target.set(L / 2, H / 2, W / 2);
+    controls.update();
+  }
+  buildContainer();
+
+  function makeBoxMesh(item) {
+    const isCyl = item.isCylinder === true;
+    // 圆柱默认绿色
+    const color = isCyl && !item.color ? '#00b42a' : item.color;
+    const geo = isCyl
+      ? new THREE.CylinderGeometry(Math.min(item.l, item.w) / 2, Math.min(item.l, item.w) / 2, item.h, 32)
+      : new THREE.BoxGeometry(item.l, item.h, item.w);
+    const mat = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.92 });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(item.x + item.l / 2, item.y + item.h / 2, item.z + item.w / 2);
+    m.userData = { instanceId: item.instanceId, baseId: item.baseId, name: item.name, category: item.category, color, l: item.l, w: item.w, h: item.h, stackable: item.stackable !== false, canBearWeight: item.canBearWeight !== false, isCylinder: isCyl };
+    const eg = isCyl ? null : new THREE.EdgesGeometry(geo);
+    if (eg) m.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222 })));
+    return m;
+  }
+  function syncMeshesFromPlaced() {
+    const keep = new Set(state.placed.map(p => p.instanceId));
+    for (const [id, m] of meshByInst) if (!keep.has(id)) { scene.remove(m); meshByInst.delete(id); }
+    for (const it of state.placed) {
+      let m = meshByInst.get(it.instanceId);
+      if (!m) { m = makeBoxMesh(it); scene.add(m); meshByInst.set(it.instanceId, m); }
+      else m.position.set(it.x + it.l / 2, it.y + it.h / 2, it.z + it.w / 2);
+      m.visible = true;
+    }
+  }
+  function validPosition(item, exceptInstanceId) {
+    const { L, W, H } = state.container;
+    if (item.x < -1e-6 || item.z < -1e-6 || item.y < -1e-6) return false;
+    if (item.x + item.l > L + 1e-6) return false;
+    if (item.z + item.w > W + 1e-6) return false;
+    if (item.y + item.h > H + 1e-6) return false;
+    for (const p of state.placed) { if (p.instanceId === exceptInstanceId) continue; if (overlap(item, p)) return false; }
+    return true;
+  }
+  // 手动模式：离地货物必须被可承压的货物托住
+  function hasBearableSupport(item, exceptInstanceId) {
+    if (item.y <= 1e-6) return true;
+    for (const p of state.placed) {
+      if (p.instanceId === exceptInstanceId) continue;
+      if (p.canBearWeight === false) continue;
+      const xz = item.x < p.x + p.l - 1e-6 && item.x + item.l > p.x + 1e-6 &&
+                item.z < p.z + p.w - 1e-6 && item.z + item.w > p.z + 1e-6;
+      if (xz && Math.abs(p.y + p.h - item.y) < 1e-6) return true;
+    }
+    return false;
+  }
+  // 重力下落：从当前 Y 向下跌落到最高的有效支撑面（地面或可承压货物顶面），返回带最终坐标的 item 或 null
+  function tryPlaceWithGravity(item) {
+    const { L, W, H } = state.container;
+    if (item.y + item.h > H + 1e-6) return null;
+    // 收集所有支撑面：地面(0) + 可承压货物的顶面（XZ 投影重叠）
+    const supports = [0];
+    for (const p of state.placed) {
+      if (p.instanceId === item.instanceId) continue;
+      if (p.canBearWeight === false) continue;
+      const xz = item.x < p.x + p.l - 1e-6 && item.x + item.l > p.x + 1e-6 &&
+                item.z < p.z + p.w - 1e-6 && item.z + item.w > p.z + 1e-6;
+      if (xz) supports.push(p.y + p.h);
+    }
+    // 只保留不高于当前 Y 的支撑面（向下落），从高到低排序
+    const cands = supports.filter(y => y <= item.y + 1e-6).sort((a, b) => b - a);
+    for (const y of cands) {
+      const cand = { ...item, y };
+      if (validPosition(cand, item.instanceId)) return cand;
+    }
+    return null;
+  }
+
+  const dragObjs = [];
+  const drag = new THREE.DragControls(dragObjs, camera, viewEl);
+  let dragStartPos = null;
+  drag.addEventListener('dragstart', e => { state.selected = e.object; controls.enabled = false; dragStartPos = e.object.position.clone(); highlightSelection(); });
+  drag.addEventListener('drag', e => {
+    const o = e.object, ud = o.userData;
+    const { H } = state.container;
+    // 拖拽时不做 XZ 夹紧，允许拖到箱外；Y 限制在合理范围
+    let y = o.position.y - ud.h / 2;
+    y = Math.max(0, Math.min(y, H - ud.h));
+    if (ud.stackable === false) y = 0; // 不可叠放货物拖拽时贴地
+    o.position.y = y + ud.h / 2;
+  });
+  drag.addEventListener('dragend', e => {
+    controls.enabled = true;
+    const o = e.object, ud = o.userData;
+    const { L, W, H } = state.container;
+    const item = { instanceId: ud.instanceId, baseId: ud.baseId, name: ud.name, color: ud.color,
+                   x: o.position.x - ud.l / 2, y: o.position.y - ud.h / 2, z: o.position.z - ud.w / 2,
+                   l: ud.l, w: ud.w, h: ud.h, stackable: ud.stackable, canBearWeight: ud.canBearWeight };
+    // 判断是否在箱内（XZ 完全在容器范围内）
+    const inside = item.x >= -1e-6 && item.x + item.l <= L + 1e-6 &&
+                   item.z >= -1e-6 && item.z + item.w <= W + 1e-6;
+    if (!inside) {
+      // 箱外：拖到哪放哪，不做约束
+      const p = state.placed.find(x => x.instanceId === item.instanceId);
+      if (p) Object.assign(p, { x: item.x, y: item.y, z: item.z });
+      refreshUI();
+      return;
+    }
+    // 箱内：夹紧 XZ 到边界
+    item.x = Math.max(0, Math.min(item.x, L - item.l));
+    item.z = Math.max(0, Math.min(item.z, W - item.w));
+    // 生成候选 XZ 位置：原位置 + 各碰撞货物的四个相邻推位
+    const cands = [{ x: item.x, z: item.z }];
+    for (const p of state.placed) {
+      if (p.instanceId === item.instanceId) continue;
+      const xz = item.x < p.x + p.l - 1e-6 && item.x + item.l > p.x + 1e-6 &&
+                item.z < p.z + p.w - 1e-6 && item.z + item.w > p.z + 1e-6;
+      if (!xz) continue;
+      const tries = [
+        { x: p.x + p.l, z: item.z }, { x: p.x - item.l, z: item.z },
+        { x: item.x, z: p.z + p.w }, { x: item.x, z: p.z - item.w },
+      ];
+      for (const t of tries) {
+        if (t.x < -1e-6 || t.x + item.l > L + 1e-6) continue;
+        if (t.z < -1e-6 || t.z + item.w > W + 1e-6) continue;
+        cands.push(t);
+      }
+    }
+    // 按距原位置的曼哈顿距离排序，优先小范围推位
+    cands.sort((a, b) => (Math.abs(a.x - item.x) + Math.abs(a.z - item.z)) - (Math.abs(b.x - item.x) + Math.abs(b.z - item.z)));
+    // 逐个尝试重力下落
+    let final = null;
+    for (const c of cands) {
+      const test = { ...item, x: c.x, z: c.z };
+      const r = tryPlaceWithGravity(test);
+      if (r) { final = r; break; }
+    }
+    if (final) {
+      const p = state.placed.find(x => x.instanceId === final.instanceId);
+      if (p) Object.assign(p, { x: final.x, y: final.y, z: final.z });
+      o.position.set(final.x + final.l / 2, final.y + final.h / 2, final.z + final.w / 2);
+      refreshUI();
+    } else {
+      // 全部失败，回退
+      o.position.copy(dragStartPos);
+      const orig = o.material.color.clone();
+      o.material.color.setHex(0xff4d4f);
+      setTimeout(() => o.material.color.copy(orig), 200);
+    }
+  });
+  function setDragMode(on) {
+    drag.enabled = on; dragObjs.length = 0;
+    if (on) for (const m of meshByInst.values()) dragObjs.push(m);
+  }
+  function highlightSelection() {
+    for (const m of meshByInst.values()) m.material.emissive && m.material.emissive.setHex(0x000000);
+    if (state.selected) state.selected.material.emissive && state.selected.material.emissive.setHex(0x3370ff);
+  }
+
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2();
+  viewEl.addEventListener('click', e => {
+    const rect = viewEl.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObjects([...meshByInst.values()]);
+    if (hits.length) { state.selected = hits[0].object; highlightSelection(); }
+    else { state.selected = null; highlightSelection(); }
+  });
+
+  function resize() {
+    if (!renderer) return;
+    const r = canvas.getBoundingClientRect();
+    renderer.setSize(r.width, r.height, false);
+    camera.aspect = r.width / r.height;
+    camera.updateProjectionMatrix();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+  (function animate() { requestAnimationFrame(animate); controls.update(); if (renderer) renderer.render(scene, camera); })();
+
+  const $ = id => document.getElementById(id);
+  function readCargoRows() {
+    const rows = [...$('cargoBody').querySelectorAll('tr')];
+    const defs = [];
+    rows.forEach((tr, i) => {
+      const inputs = tr.querySelectorAll('input, select');
+      const name = (inputs[0].value || '货物' + i).trim();
+      const category = inputs[1].value;
+      const l = +inputs[2].value || 0, w = +inputs[3].value || 0, h = +inputs[4].value || 0;
+      const qty = Math.max(1, +inputs[5].value || 1);
+      const color = inputs[6].value;
+      const stackable = inputs[7].checked;
+      const canBearWeight = inputs[8].checked;
+      const isCylinder = inputs[9].checked;
+      if (l > 0 && w > 0 && h > 0) defs.push({ id: tr.dataset.id, name, category, l, w, h, qty, color, stackable, canBearWeight, isCylinder });
+    });
+    state.cargoDef = defs; return defs;
+  }
+  function addCargoRow(def = {}) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = 'c' + (state.nextId++);
+    const colors = ['#ff7d00', '#165dff', '#00b42a', '#f53f3f', '#722ed1', '#eb2f96', '#14c9c9', '#f7ba1e'];
+    const c = def.color || colors[Math.floor(Math.random() * colors.length)];
+    const stackChk = (def.stackable === false) ? '' : 'checked';
+    const bearChk = (def.canBearWeight === false) ? '' : 'checked';
+    const cylChk = def.isCylinder ? 'checked' : '';
+    // 名称按添加顺序自动编号（可手动修改）
+    const name = def.name || String(state.nameSeq++);
+    const cat = def.category || '托盘';
+    const catOpts = ['纸箱', '木箱', '托盘'].map(o => `<option value="${o}" ${o === cat ? 'selected' : ''}>${o}</option>`).join('');
+    tr.innerHTML = `<td><input type="text" value="${name}" class="name-input"></td><td><select>${catOpts}</select></td><td><input type="number" value="${def.l || ''}"></td><td><input type="number" value="${def.w || ''}"></td><td><input type="number" value="${def.h || ''}"></td><td><input type="number" value="${def.qty || 1}" min="1"></td><td><input type="color" value="${c}"></td><td class="chk-cell"><input type="checkbox" ${stackChk} title="勾掉=只能放地面，不能叠在别的货物上"></td><td class="chk-cell"><input type="checkbox" ${bearChk} title="勾掉=上面不能再放别的货物（不可被压）"></td><td class="chk-cell"><input type="checkbox" ${cylChk} title="勾选=圆柱体外观（碰撞仍按长方体）"></td><td><button class="btn" data-act="del">×</button></td>`;
+    tr.querySelector('[data-act=del]').onclick = () => tr.remove();
+    // 名称输入框根据内容自动调整宽度（紧贴内容，不占多余空间）
+    const nameIn = tr.querySelector('.name-input');
+    const fitName = () => { nameIn.style.width = Math.max(24, nameIn.value.length * 12 + 10) + 'px'; };
+    nameIn.addEventListener('input', fitName);
+    fitName();
+    // 勾选圆柱时默认颜色设为绿色（用户可再改）
+    const cylCb = tr.querySelectorAll('input')[8];
+    const colorIn = tr.querySelectorAll('input')[5];
+    cylCb.addEventListener('change', () => { if (cylCb.checked) colorIn.value = '#00b42a'; });
+    $('cargoBody').appendChild(tr);
+  }
+  addCargoRow({ l: 60, w: 40, h: 50, qty: 8, category: '纸箱' });
+  addCargoRow({ l: 80, w: 60, h: 30, qty: 5, category: '纸箱' });
+  addCargoRow({ l: 40, w: 30, h: 20, qty: 10, category: '托盘' });
+
+  $('addCargo').onclick = () => addCargoRow();
+  // 常用集装箱尺寸预设
+  document.querySelectorAll('[data-preset]').forEach(btn => {
+    btn.onclick = () => {
+      const [l, w, h] = btn.dataset.preset.split(',').map(Number);
+      $('cW').value = l; $('cD').value = w; $('cH').value = h;
+      state.container = { L: l, W: w, H: h };
+      buildContainer(); setDragMode(state.mode === 'manual');
+    };
+  });
+  $('applyContainer').onclick = () => {
+    state.container = { L: +$('cW').value, W: +$('cD').value, H: +$('cH').value };
+    buildContainer(); setDragMode(state.mode === 'manual');
+  };
+  $('autoPack').onclick = () => {
+    const defs = readCargoRows();
+    const packer = new Packer(state.container.L, state.container.W, state.container.H);
+    const { placed, unplaced } = packer.packAll(defs);
+    state.placed = placed.map(p => {
+      const def = defs.find(d => d.id === p.baseId);
+      return { instanceId: p.instanceId, baseId: p.baseId, name: p.name, category: p.category, color: p.color, x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, stackable: p.stackable !== false, canBearWeight: p.canBearWeight !== false, isCylinder: p.isCylinder === true };
+    });
+    state.unplaced = unplaced;
+    state.stepIndex = state.placed.length;
+    syncMeshesFromPlaced(); setDragMode(state.mode === 'manual'); refreshUI();
+  };
+  $('clearBox').onclick = () => {
+    state.placed = []; state.stepIndex = 0;
+    for (const m of meshByInst.values()) scene.remove(m);
+    meshByInst.clear(); setDragMode(state.mode === 'manual'); refreshUI();
+  };
+  document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = e => {
+    state.mode = e.target.value;
+    setDragMode(state.mode === 'manual');
+    $('pendingWrap').style.display = state.mode === 'manual' ? '' : 'none';
+    refreshUI();
+  });
+  $('rotateSel').onclick = () => {
+    if (!state.selected) { alert('请先点击选中一件货物'); return; }
+    const o = state.selected, ud = o.userData;
+    const cur = state.placed.find(p => p.instanceId === ud.instanceId);
+    if (!cur) return;
+    const base = { l: cur.l, w: cur.w, h: cur.h };
+    const orients = orientations(base);
+    let idx = orients.findIndex(o => o.l === cur.l && o.w === cur.w && o.h === cur.h);
+    idx = (idx + 1) % orients.length;
+    const next = orients[idx];
+    const cand = { ...cur, l: next.l, w: next.w, h: next.h };
+    // 旋转后应用重力下落，避免悬空
+    const afterG = tryPlaceWithGravity(cand);
+    const finalCand = afterG || cand;
+    if (!validPosition(finalCand, cur.instanceId)) { alert('旋转后无法放入，请先腾出空间'); return; }
+    Object.assign(cur, finalCand);
+    ud.l = cur.l; ud.w = cur.w; ud.h = cur.h;
+    scene.remove(o); meshByInst.delete(cur.instanceId);
+    const nm = makeBoxMesh(cur); scene.add(nm); meshByInst.set(cur.instanceId, nm);
+    state.selected = nm; setDragMode(state.mode === 'manual');
+    refreshUI();
+  };
+  $('removeSel').onclick = () => {
+    if (!state.selected) { alert('请先选中货物'); return; }
+    const id = state.selected.userData.instanceId;
+    state.placed = state.placed.filter(p => p.instanceId !== id);
+    scene.remove(state.selected); meshByInst.delete(id);
+    state.selected = null; setDragMode(state.mode === 'manual'); refreshUI();
+  };
+
+  function refreshUI() {
+    const { L, W, H } = state.container;
+    const volC = L * W * H;
+    const used = state.placed.reduce((s, p) => s + p.l * p.w * p.h, 0);
+    const rate = volC ? (used / volC * 100).toFixed(1) : 0;
+    $('stats').innerHTML = `集装箱内尺寸：${L} × ${W} × ${H} cm<br>容器容积：${(volC / 1e6).toFixed(2)} m³<br>已装箱数：${state.placed.length} 件<br>占用体积：${(used / 1e6).toFixed(2)} m³<br>空间利用率：<b>${rate}%</b>`;
+    const defs = state.cargoDef.length ? state.cargoDef : readCargoRows();
+    const placedCount = {};
+    state.placed.forEach(p => { placedCount[p.baseId] = (placedCount[p.baseId] || 0) + 1; });
+    const pend = defs.map(d => ({ ...d, left: Math.max(0, (d.qty || 1) - (placedCount[d.id] || 0)) })).filter(d => d.left > 0);
+    $('pendingList').innerHTML = pend.map(d => `<div class="pend-item" data-id="${d.id}"><span class="pend-swatch" style="background:${d.color}"></span>${d.name} ${d.l}×${d.w}×${d.h} ×${d.left}</div>`).join('');
+    $('pendingList').querySelectorAll('.pend-item').forEach(el => el.onclick = () => {
+      if (state.mode !== 'manual') { alert('切换到手动模式后可放入'); return; }
+      const d = defs.find(x => x.id === el.dataset.id);
+      if (d) placeOnePending(d);
+    });
+    $('cursorInfo').textContent = `待装箱：${pend.reduce((s, d) => s + d.left, 0)} / 已装箱：${state.placed.length}`;
+    $('stepInfo').textContent = state.placed.length ? `当前显示：${state.stepIndex} / ${state.placed.length} 件` : '无装箱数据';
+    applyStepView();
+  }
+  function placeOnePending(def) {
+    const item = { instanceId: 'manual-' + (state.nextId++), baseId: def.id, name: def.name, category: def.category, color: def.color, x: 0, y: 0, z: 0, l: def.l, w: def.w, h: def.h, stackable: def.stackable !== false, canBearWeight: def.canBearWeight !== false, isCylinder: def.isCylinder === true };
+    if (!validPosition(item, item.instanceId)) {
+      const step = 50; let ok = false;
+      for (let y = 0; y <= state.container.H - item.h && !ok; y += step) {
+        // 不可叠加货物只能放地面
+        if (def.stackable === false && y > 1e-6) break;
+        for (let z = 0; z <= state.container.W - item.w && !ok; z += step)
+          for (let x = 0; x <= state.container.L - item.l && !ok; x += step) {
+            const c = { ...item, x, y, z };
+            if (validPosition(c, c.instanceId)) { Object.assign(item, c); ok = true; }
+          }
+      }
+      if (!ok) { alert('找不到空位'); return; }
+    }
+    state.placed.push(item); state.stepIndex = state.placed.length;
+    syncMeshesFromPlaced(); setDragMode(true); refreshUI();
+  }
+  function applyStepView() {
+    state.placed.forEach((p, i) => { const m = meshByInst.get(p.instanceId); if (m) m.visible = i < state.stepIndex; });
+  }
+  $('stepPrev').onclick = () => { state.stepIndex = Math.max(0, state.stepIndex - 1); refreshUI(); };
+  $('stepNext').onclick = () => { state.stepIndex = Math.min(state.placed.length, state.stepIndex + 1); refreshUI(); };
+  $('stepReset').onclick = () => { state.stepIndex = state.placed.length; refreshUI(); };
+
+  $('exportPlan').onclick = () => {
+    const data = { container: state.container, cargoDef: readCargoRows(), placed: state.placed, exportedAt: new Date().toISOString() };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = '装箱方案.json'; a.click();
+    URL.revokeObjectURL(url);
+  };
+  $('importPlan').onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const data = JSON.parse(r.result);
+        state.container = data.container;
+        $('cW').value = data.container.L; $('cD').value = data.container.W; $('cH').value = data.container.H;
+        buildContainer();
+        $('cargoBody').innerHTML = '';
+        (data.cargoDef || []).forEach(d => addCargoRow(d));
+        readCargoRows();
+        state.placed = data.placed || [];
+        state.stepIndex = state.placed.length;
+        for (const m of meshByInst.values()) scene.remove(m);
+        meshByInst.clear();
+        syncMeshesFromPlaced();
+        for (const m of meshByInst.values()) { const ud = m.userData; const p = state.placed.find(x => x.instanceId === ud.instanceId); if (p) { ud.l = p.l; ud.w = p.w; ud.h = p.h; ud.name = p.name; ud.color = p.color; ud.baseId = p.baseId; } }
+        setDragMode(state.mode === 'manual');
+        refreshUI();
+      } catch (err) { alert('导入失败：' + err.message); }
+    };
+    r.readAsText(f);
+  };
+
+  readCargoRows();
+  refreshUI();
+  $('pendingWrap').style.display = 'none';
+  window.__boxApp = { state, readCargoRows, refreshUI, Packer, meshByInst };
+})();
+</script>
+</body>
+</html>
