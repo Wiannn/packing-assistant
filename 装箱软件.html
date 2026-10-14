@@ -164,8 +164,14 @@ function overlap(a, b) {
          a.y < b.y + b.h - 1e-6 && a.y + a.h > b.y + 1e-6 &&
          a.z < b.z + b.w - 1e-6 && a.z + a.w > b.z + 1e-6;
 }
-// 最小支撑覆盖率：货物底面被承重足够的顶面覆盖 ≥ 70% 即视为稳定（允许跨接缝、局部悬空）
+// 最小支撑覆盖率：货物底面被承重足够的顶面覆盖 ≥ 70% 即视为稳定（允许跨接缝、局部悬空，贴近实际装柜）
 const MIN_SUPPORT = 0.7;
+// 单次自动装箱的候选位评估上限：超过后停止填充，剩余货物留在箱外。
+// 用于兜底防止超大清单把浏览器主线程卡死（正常几十件的清单远达不到这个量级）
+const MAX_CANDIDATES = 6000000;
+// 单次自动装箱的时间上限（毫秒）。候选位评估越往后单次成本越高，仅靠数量上限不足以约束耗时，
+// 再加一道时间兜底，保证任何清单都不会把浏览器冻住
+const MAX_PACK_MS = 2500;
 // 计算货物底面的支撑覆盖率（0~1）。sups 为已裁剪到货物底面范围内的支撑矩形 [{xs,xe,zs,ze}]
 // 用 x 方向切片 + z 向区间并集求精确覆盖面积
 function computeSupportCoverage(item, sups) {
@@ -192,7 +198,7 @@ function computeSupportCoverage(item, sups) {
 // 承重等级：A 能叠在 B 上 ⟺ B.level >= A.level；地面可放任何货物
 // levelOf(item) 由主程序注入，返回该货物的承重等级
 class Packer {
-  constructor(L, W, H, levelOf) { this.L = L; this.W = W; this.H = H; this.levelOf = levelOf || (() => 1); }
+  constructor(L, W, H, levelOf) { this.L = L; this.W = W; this.H = H; this.levelOf = levelOf || (() => 1); this._evals = 0; this._t0 = Date.now(); }
   // 仅平面 90° 旋转（长↔宽互换），高保持不变
   getOrientations(item) {
     const { l, w, h } = item;
@@ -202,11 +208,14 @@ class Packer {
   }
   // ---- 3D 碰撞 / 支撑检测（x、z 双向都不能悬空）----
   _collide3D(b, boxes) {
-    return boxes.some(u =>
-      u.x < b.x + b.l - 1e-6 && u.x + u.l > b.x + 1e-6 &&
-      u.y < b.y + b.h - 1e-6 && u.y + u.h > b.y + 1e-6 &&
-      u.z < b.z + b.w - 1e-6 && u.z + u.w > b.z + 1e-6
-    );
+    const bx1 = b.x + b.l - 1e-6, by1 = b.y + b.h - 1e-6, bz1 = b.z + b.w - 1e-6;
+    for (let i = 0; i < boxes.length; i++) {
+      const u = boxes[i];
+      if (u.x < bx1 && u.x + u.l > b.x + 1e-6 &&
+          u.y < by1 && u.y + u.h > b.y + 1e-6 &&
+          u.z < bz1 && u.z + u.w > b.z + 1e-6) return true;
+    }
+    return false;
   }
   // 底面矩形 [x,x+l]×[z,z+w] 在高度 y 必须被承重等级足够的顶面覆盖 ≥ MIN_SUPPORT（地面除外）
   _supported3D(b, boxes, level) {
@@ -224,6 +233,8 @@ class Packer {
     return computeSupportCoverage(b, sups) >= MIN_SUPPORT;
   }
   packAll(items) {
+    this._evals = 0; // 候选位评估计数，用于安全预算兜底
+    this._t0 = Date.now();
     // 展开成单件实例
     const flat = [];
     for (const it of items) {
@@ -340,60 +351,85 @@ class Packer {
     const groupList = [...groups.values()];
     groupList.sort((a, b) => ((b[0].mustLoad ? 1 : 0) - (a[0].mustLoad ? 1 : 0)) || ((b[0].l * b[0].w * b[0].h) - (a[0].l * a[0].w * a[0].h)));
     const remaining = groupList.flat();
-    let fillProgress = true;
-    while (fillProgress && remaining.length) {
-      fillProgress = false;
+    // 逐轮遍历：一轮里尽量把能放的都放进去，整轮放不动了才结束。
+    // 不再"每放一件就从头重扫"——那样每装一件都要把装不下的货物重新完整探测一遍，
+    // 是之前自动装箱卡死的主要来源。
+    while (remaining.length) {
+      let progress = false;
       for (let i = 0; i < remaining.length; i++) {
         const it = remaining[i];
         const lv = this.levelOf(it);
         const hit = this._findFillPos(it, boxes, lv);
-        if (hit) {
-          const { o, p } = hit;
-          const box = { x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h, level: lv };
-          boxes.push(box);
-          placed.push({
-            instanceId: it.instanceId, baseId: it.id, name: it.name, category: it.category, color: it.color,
-            x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h,
-            isCylinder: it.isCylinder === true, mustLoad: !!it.mustLoad,
-          });
-          remaining.splice(i, 1);
-          fillProgress = true;
-          break; // 放入一件后重新从头扫描（大件/必装优先，新边界面带来新位置）
-        }
+        if (!hit) continue;
+        const { o, p } = hit;
+        boxes.push({ x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h, level: lv });
+        placed.push({
+          instanceId: it.instanceId, baseId: it.id, name: it.name, category: it.category, color: it.color,
+          x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h,
+          isCylinder: it.isCylinder === true, mustLoad: !!it.mustLoad,
+        });
+        remaining.splice(i, 1);
+        i--;
+        progress = true;
       }
+      if (!progress) break;
     }
 
     return { placed, unplaced: remaining };
   }
-  // 全局 3D 极值点搜索：候选 x/y/z 取 0、箱界齐平、以及每个已放盒子的各边界面
+  // 全局 3D 极值点搜索：按高度分层生成候选。
+  // 关键：某一层只取"竖直方向与该层相交"的箱子作为 x/z 候选来源，而不是全部箱子的面两两组合；
+  // 否则候选位数是 O(N³) 级，装不下的货物每轮都要把海量候选位试完，把浏览器主线程卡死。
   _findFillPos(it, boxes, level) {
+    if (this._evals >= MAX_CANDIDATES) return null; // 预算耗尽：停止填充，剩余货物留在箱外
+    if (Date.now() - this._t0 > MAX_PACK_MS) return null; // 耗时兜底：避免超大清单冻住浏览器
     const orients = this.getOrientations(it);
-    const xSet = new Set([0]);
+    const L = this.L, W = this.W, H = this.H, h = it.h;
+    let maxL = orients[0].l, maxW = orients[0].w;
+    for (const o of orients) { if (o.l > maxL) maxL = o.l; if (o.w > maxW) maxW = o.w; }
     const ySet = new Set([0]);
-    const zSet = new Set([0]);
-    for (const o of orients) {
-      xSet.add(this.L - o.l); // 顶到箱最深处端面
-      zSet.add(this.W - o.w); // 贴右墙
-    }
-    for (const u of boxes) {
-      xSet.add(u.x); xSet.add(u.x + u.l);
-      ySet.add(u.y + u.h);
-      zSet.add(u.z); zSet.add(u.z + u.w);
-      for (const o of orients) {
-        xSet.add(u.x - o.l);          // 货物右端面贴着 u 的左端面（向门口方向紧靠）
-        xSet.add(u.x + u.l - o.l);    // 货物右端面与 u 的右端面齐平（如导轨顶从深处端起排）
-        zSet.add(u.z - o.w);
-        zSet.add(u.z + u.w - o.w);
-      }
-    }
-    const xs = [...xSet].filter(v => v >= -1e-6).sort((a, b) => b - a); // 深处优先
-    const ys = [...ySet].sort((a, b) => a - b);                          // 底层优先
-    const zs = [...zSet].filter(v => v >= -1e-6).sort((a, b) => a - b);  // 贴左墙优先
+    for (const u of boxes) ySet.add(u.y + u.h);
+    const ys = [...ySet].filter(v => v + h <= H + 1e-6).sort((a, b) => a - b); // 底层优先
     for (const y of ys) {
+      const xSet = new Set([0]), zSet = new Set([0]);
+      for (const o of orients) {
+        xSet.add(L - o.l); // 顶到箱最深处端面
+        zSet.add(W - o.w); // 贴右墙
+      }
+      for (const u of boxes) {
+        if (u.y >= y + h - 1e-6 || u.y + u.h <= y + 1e-6) continue; // 竖直方向不相交的箱子与本层无关
+        xSet.add(u.x); xSet.add(u.x + u.l);
+        zSet.add(u.z); zSet.add(u.z + u.w);
+        for (const o of orients) {
+          xSet.add(u.x - o.l);          // 货物右端面贴着 u 的左端面（向门口方向紧靠）
+          xSet.add(u.x + u.l - o.l);    // 货物右端面与 u 的右端面齐平（如导轨顶从深处端起排）
+          zSet.add(u.z - o.w);
+          zSet.add(u.z + u.w - o.w);
+        }
+      }
+      if (y > 1e-6) {
+        // 本层必须有承重等级足够的顶面；并把候选限制在支撑区域包围盒附近（必要条件，不漏解）
+        let sx0 = Infinity, sx1 = -Infinity, sz0 = Infinity, sz1 = -Infinity, has = false;
+        for (const u of boxes) {
+          if (u.level < level) continue;
+          if (Math.abs(u.y + u.h - y) >= 1e-6) continue;
+          has = true;
+          if (u.x < sx0) sx0 = u.x;
+          if (u.x + u.l > sx1) sx1 = u.x + u.l;
+          if (u.z < sz0) sz0 = u.z;
+          if (u.z + u.w > sz1) sz1 = u.z + u.w;
+        }
+        if (!has) continue; // 该高度没有任何可承重的顶面，整层跳过
+        for (const x of [...xSet]) if (x > sx1 + 1e-6 || x + maxL < sx0 - 1e-6) xSet.delete(x);
+        for (const z of [...zSet]) if (z > sz1 + 1e-6 || z + maxW < sz0 - 1e-6) zSet.delete(z);
+      }
+      const xs = [...xSet].filter(v => v >= -1e-6).sort((a, b) => b - a); // 深处优先
+      const zs = [...zSet].filter(v => v >= -1e-6).sort((a, b) => a - b); // 贴左墙优先
       for (const x of xs) {
         for (const z of zs) {
           for (const o of orients) {
-            if (x + o.l > this.L + 1e-6 || y + o.h > this.H + 1e-6 || z + o.w > this.W + 1e-6) continue;
+            if (x + o.l > L + 1e-6 || y + o.h > H + 1e-6 || z + o.w > W + 1e-6) continue;
+            this._evals++;
             const b = { x, y, z, l: o.l, w: o.w, h: o.h };
             if (this._collide3D(b, boxes)) continue;
             if (!this._supported3D(b, boxes, level)) continue;
