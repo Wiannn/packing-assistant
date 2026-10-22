@@ -71,6 +71,7 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
       <div class="row btns">
         <button id="applyContainer" class="btn">应用</button>
         <button class="btn" data-preset="589,235,239">20GP</button>
+        <button class="btn" data-preset="1200,235,239">40GP</button>
         <button class="btn" data-preset="1200,235,269">40HC</button>
       </div>
     </section>
@@ -198,7 +199,13 @@ function computeSupportCoverage(item, sups) {
 // 承重等级：A 能叠在 B 上 ⟺ B.level >= A.level；地面可放任何货物
 // levelOf(item) 由主程序注入，返回该货物的承重等级
 class Packer {
-  constructor(L, W, H, levelOf) { this.L = L; this.W = W; this.H = H; this.levelOf = levelOf || (() => 1); this._evals = 0; this._t0 = Date.now(); }
+  constructor(L, W, H, levelOf, opts) {
+    this.L = L; this.W = W; this.H = H; this.levelOf = levelOf || (() => 1);
+    // 计算预算：默认是"快速出结果"的小预算；后台精算时传入更大（或 Infinity）的值
+    this.maxCandidates = (opts && opts.maxCandidates != null) ? opts.maxCandidates : MAX_CANDIDATES;
+    this.maxPackMs = (opts && opts.maxPackMs != null) ? opts.maxPackMs : MAX_PACK_MS;
+    this._evals = 0; this._t0 = Date.now();
+  }
   // 仅平面 90° 旋转（长↔宽互换），高保持不变
   getOrientations(item) {
     const { l, w, h } = item;
@@ -233,6 +240,14 @@ class Packer {
     return computeSupportCoverage(b, sups) >= MIN_SUPPORT;
   }
   packAll(items) {
+    const g = this.packAllSteps(items);
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+  // 可中断版本：整个装箱过程拆成一个个可让出控制权的步骤，
+  // 供"后台继续精算"分批驱动（浏览器主线程不会被长时间占住）
+  *packAllSteps(items) {
     this._evals = 0; // 候选位评估计数，用于安全预算兜底
     this._t0 = Date.now();
     // 展开成单件实例
@@ -282,7 +297,7 @@ class Packer {
     }
     let best = null;
     for (const assign of (combos.length ? combos : [[]])) {
-      const res = this._runPack(rest, cols, assign);
+      const res = yield* this._runPackSteps(rest, cols, assign);
       if (!best || this._scoreBetter(res, best)) best = res;
     }
     return { placed: this._loadingOrder(best.placed), unplaced: best.unplaced };
@@ -324,8 +339,16 @@ class Packer {
     const vb = b.unplaced.reduce((s, it) => s + it.l * it.w * it.h, 0);
     return va < vb;
   }
-  // 给定侧墙列的 x 分配方案，跑一遍完整装箱
+  // 给定侧墙列的 x 分配方案，跑一遍完整装箱（同步驱动：一次性跑完，供快速出结果使用）
   _runPack(rest, cols, assign) {
+    const g = this._runPackSteps(rest, cols, assign);
+    let r = g.next();
+    while (!r.done) r = g.next();
+    return r.value;
+  }
+  // 同上，但改成可中断的生成器：每探测一件货物就让出一次控制权，
+  // 供后台精算分批驱动，避免长时间占用主线程导致"页面无响应"
+  *_runPackSteps(rest, cols, assign) {
     const boxes = [];  // 已放 3D 盒子（含 x 区间）
     const placed = [];
     cols.forEach((c, ci) => {
@@ -357,6 +380,7 @@ class Packer {
     while (remaining.length) {
       let progress = false;
       for (let i = 0; i < remaining.length; i++) {
+        yield; // 每探测一件货物让出一次控制权（生成器驱动时用于分批后台计算）
         const it = remaining[i];
         const lv = this.levelOf(it);
         const hit = this._findFillPos(it, boxes, lv);
@@ -381,8 +405,8 @@ class Packer {
   // 关键：某一层只取"竖直方向与该层相交"的箱子作为 x/z 候选来源，而不是全部箱子的面两两组合；
   // 否则候选位数是 O(N³) 级，装不下的货物每轮都要把海量候选位试完，把浏览器主线程卡死。
   _findFillPos(it, boxes, level) {
-    if (this._evals >= MAX_CANDIDATES) return null; // 预算耗尽：停止填充，剩余货物留在箱外
-    if (Date.now() - this._t0 > MAX_PACK_MS) return null; // 耗时兜底：避免超大清单冻住浏览器
+    if (this._evals >= this.maxCandidates) return null; // 预算耗尽：停止填充，剩余货物留在箱外
+    if (Date.now() - this._t0 > this.maxPackMs) return null; // 耗时兜底：避免超大清单冻住浏览器
     const orients = this.getOrientations(it);
     const L = this.L, W = this.W, H = this.H, h = it.h;
     let maxL = orients[0].l, maxW = orients[0].w;
@@ -457,6 +481,18 @@ class Packer {
   function levelOfItem(it) { return levelOfCat(it.category); }
   const meshByInst = new Map();
   const unplacedMeshes = new Map(); // 装不下的货物 mesh（放在集装箱外）
+
+  // ===== 后台精算任务管理 =====
+  // 自动装箱分两阶段：先用小预算"快速出结果"立即渲染，再在后台分批精算全质量布局，
+  // 算完若装入更多件则自动替换。bgPack 保存当前后台任务；bgPackStatus 是展示在统计区的文案。
+  let bgPack = null;
+  let bgPackStatus = '';
+  // 作废正在进行的后台精算（再次装箱 / 改清单 / 切清单 / 手动调整时调用）
+  function cancelBgPack() {
+    if (bgPack) bgPack.cancel = true;
+    bgPack = null;
+    if (bgPackStatus) { bgPackStatus = ''; refreshUI(); }
+  }
 
   const canvas = document.getElementById('three-canvas');
   let renderer = null;
@@ -678,7 +714,7 @@ class Packer {
   const dragObjs = [];
   const drag = new THREE.DragControls(dragObjs, camera, viewEl);
   let dragStartPos = null;
-  drag.addEventListener('dragstart', e => { state.selected = e.object; controls.enabled = false; dragStartPos = e.object.position.clone(); highlightSelection(); });
+  drag.addEventListener('dragstart', e => { cancelBgPack(); state.selected = e.object; controls.enabled = false; dragStartPos = e.object.position.clone(); highlightSelection(); });
   drag.addEventListener('drag', e => {
     const o = e.object, ud = o.userData;
     const { H } = state.container;
@@ -963,6 +999,7 @@ class Packer {
   }
   // 把某套清单数据加载到界面（表格 + 集装箱 + 等级）
   function applyListData(data) {
+    cancelBgPack();
     if (data.catLevel) { Object.assign(state.catLevel, data.catLevel); renderLevelRules(); }
     if (data.container) {
       state.container = data.container;
@@ -984,7 +1021,7 @@ class Packer {
 
   // 防抖自动保存
   let _saveTimer = null;
-  function scheduleAutoSave() { clearTimeout(_saveTimer); _saveTimer = setTimeout(saveCargoState, 400); }
+  function scheduleAutoSave() { cancelBgPack(); clearTimeout(_saveTimer); _saveTimer = setTimeout(saveCargoState, 400); }
 
   // 清单切换 / 另存为 / 删除
   $('listSelect').onchange = () => {
@@ -1046,31 +1083,83 @@ class Packer {
       $('cW').value = l; $('cD').value = w; $('cH').value = h;
       state.container = { L: l, W: w, H: h };
       buildContainer(); setDragMode(state.mode === 'manual');
-      scheduleAutoSave();
+      scheduleAutoSave(); refreshUI();
     };
   });
   $('applyContainer').onclick = () => {
     state.container = { L: +$('cW').value, W: +$('cD').value, H: +$('cH').value };
     buildContainer(); setDragMode(state.mode === 'manual');
-    scheduleAutoSave();
+    scheduleAutoSave(); refreshUI();
   };
   $('autoPack').onclick = () => {
     const allDefs = readCargoRows();
     const defs = allDefs.filter(d => d.enabled !== false);
     if (defs.length === 0) { alert('没有勾选"显示"的货物，无法装箱'); return; }
-    const packer = new Packer(state.container.L, state.container.W, state.container.H, levelOfItem);
-    const { placed, unplaced } = packer.packAll(defs);
-    state.placed = placed.map(p => {
-      const def = defs.find(d => d.id === p.baseId);
-      return { instanceId: p.instanceId, baseId: p.baseId, name: p.name, category: p.category, color: p.color, x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, isCylinder: p.isCylinder === true };
-    });
-    state.unplaced = unplaced;
+    cancelBgPack();
+    // ===== 第一阶段：小预算快速算出结果，立即渲染（点击后马上有反馈，界面即刻可用）=====
+    const tPack0 = Date.now();
+    const fast = new Packer(state.container.L, state.container.W, state.container.H, levelOfItem);
+    const r0 = fast.packAll(defs);
+    state.placed = toPlaced(r0.placed);
+    state.unplaced = r0.unplaced;
     state.stepIndex = state.placed.length;
     syncMeshesFromPlaced();
-    renderUnplaced(unplaced);
-    setDragMode(state.mode === 'manual'); refreshUI();
+    renderUnplaced(r0.unplaced);
+    setDragMode(state.mode === 'manual');
+    const fastCount = state.placed.length;
+    const fastMs = Date.now() - tPack0;
+    // 快速阶段是否被"候选位数量 / 耗时"预算截断：命中预算说明没算完，值得后台继续算；
+    // 未命中说明它已把能放的全放完（结果即最优），无需后台再算（注意不能用耗时判断，
+    // 大清单常在 1s 内就把候选位数量预算用光而中断）
+    const truncated = fast._evals >= fast.maxCandidates || fastMs >= fast.maxPackMs - 100;
+    if (!truncated) { refreshUI(); return; }
+    // ===== 第二阶段：后台用更大预算继续精算全质量布局，分批驱动，界面全程不冻结 =====
+    bgPackStatus = `后台优化中…（快速方案已装入 ${fastCount} 件，界面可继续操作）`;
+    refreshUI();
+    const fine = new Packer(state.container.L, state.container.W, state.container.H, levelOfItem,
+                            { maxCandidates: Infinity, maxPackMs: 30000 });
+    const task = { gen: fine.packAllSteps(defs), cancel: false, fastCount };
+    bgPack = task;
+    setTimeout(() => driveBgPack(task), 0);
   };
+  function toPlaced(arr) {
+    return arr.map(p => ({ instanceId: p.instanceId, baseId: p.baseId, name: p.name, category: p.category, color: p.color, x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, isCylinder: p.isCylinder === true }));
+  }
+  // 分批驱动后台精算生成器：每片最多占用主线程约 30ms，其余时间交还给 UI，
+  // 避免 1000+ 件散货因单次计算过久导致"页面无响应"
+  function driveBgPack(task) {
+    if (task.cancel || bgPack !== task) return;
+    const t0 = performance.now();
+    let r;
+    try {
+      do { r = task.gen.next(); } while (!r.done && performance.now() - t0 < 30);
+    } catch (err) {
+      console.warn('后台精算异常，保留快速方案：', err);
+      if (bgPack === task) { bgPack = null; bgPackStatus = ''; refreshUI(); }
+      return;
+    }
+    if (task.cancel || bgPack !== task) return;
+    if (!r.done) { setTimeout(() => driveBgPack(task), 0); return; }
+    // 精算完成：只有装入件数更多才替换，否则保留快速方案（绝不回退已有结果）
+    bgPack = null;
+    const res = r.value;
+    if (res.placed.length > task.fastCount) {
+      state.placed = toPlaced(res.placed);
+      state.unplaced = res.unplaced;
+      state.stepIndex = state.placed.length;
+      syncMeshesFromPlaced();
+      renderUnplaced(res.unplaced);
+      setDragMode(state.mode === 'manual');
+      bgPackStatus = `已后台优化：${task.fastCount} → ${res.placed.length} 件`;
+    } else {
+      bgPackStatus = `后台优化完成：快速方案已是最优（${task.fastCount} 件）`;
+    }
+    refreshUI();
+    const shown = bgPackStatus;
+    setTimeout(() => { if (bgPackStatus === shown) { bgPackStatus = ''; refreshUI(); } }, 8000);
+  }
   $('clearBox').onclick = () => {
+    cancelBgPack();
     state.placed = []; state.stepIndex = 0;
     for (const m of meshByInst.values()) scene.remove(m);
     meshByInst.clear();
@@ -1086,6 +1175,7 @@ class Packer {
   $('rotateSel').onclick = rotateSelected;
   function rotateSelected() {
     if (!state.selected) { alert('请先点击选中一件货物'); return; }
+    cancelBgPack();
     const o = state.selected, ud = o.userData;
     const cur = state.placed.find(p => p.instanceId === ud.instanceId);
     if (!cur) return;
@@ -1128,6 +1218,7 @@ class Packer {
   }
   $('removeSel').onclick = () => {
     if (!state.selected) { alert('请先选中货物'); return; }
+    cancelBgPack();
     const id = state.selected.userData.instanceId;
     if (state.selected.userData.unplaced) {
       // 移除箱外未装入货物：只从陈列中拿掉，回到"待装"清单
@@ -1146,19 +1237,29 @@ class Packer {
     setDragMode(state.mode === 'manual'); refreshUI();
   };
 
+  // 实际装箱可用方（行业经验值：扣除箱体结构、门框、绑扎空间后可实际装载的体积）
+  // 键为集装箱内尺寸（长x宽x高 cm），与三个预设按钮一一对应
+  const USABLE_VOLUME = {
+    '589x235x239': 27,   // 20GP
+    '1200x235x239': 57,  // 40GP
+    '1200x235x269': 67   // 40HQ(40HC)
+  };
+
   function refreshUI() {
     const { L, W, H } = state.container;
     const volC = L * W * H;
+    const usable = USABLE_VOLUME[`${Math.round(L)}x${Math.round(W)}x${Math.round(H)}`];
     const used = state.placed.reduce((s, p) => s + p.l * p.w * p.h, 0);
     const rate = volC ? (used / volC * 100).toFixed(1) : 0;
     const defs = (state.cargoDef.length ? state.cargoDef : readCargoRows()).filter(d => d.enabled !== false);
     // 清单体积 = 清单中所有勾选货物的总体积（含数量）
     const listVol = defs.reduce((s, d) => s + d.l * d.w * d.h * (d.qty || 1), 0);
-    let statsHtml = `容器容积：${(volC / 1e6).toFixed(2)} m³<br>清单体积：${(listVol / 1e6).toFixed(2)} m³<br>已装箱数：${state.placed.length} 件<br>已装体积：${(used / 1e6).toFixed(2)} m³<br>空间利用率：<b>${rate}%</b>`;
+    let statsHtml = `容器容积：${(volC / 1e6).toFixed(2)} m³<br>实际装箱可用方：${usable != null ? usable + ' m³' : '—（自定义尺寸）'}<br>清单体积：${(listVol / 1e6).toFixed(2)} m³<br>已装箱数：${state.placed.length} 件<br>已装体积：${(used / 1e6).toFixed(2)} m³<br>空间利用率：<b>${rate}%</b>`;
     if (state.unplaced && state.unplaced.length > 0) {
       const unplacedVol = state.unplaced.reduce((s, it) => s + it.l * it.w * it.h, 0);
       statsHtml += `<br><span style="color:#f53f3f">未装入：${state.unplaced.length} 件（${(unplacedVol / 1e6).toFixed(2)} m³），见集装箱右侧</span>`;
     }
+    if (bgPackStatus) statsHtml += `<br><span style="color:#165dff">${bgPackStatus}</span>`;
     $('stats').innerHTML = statsHtml;
     const placedCount = {};
     state.placed.forEach(p => { placedCount[p.baseId] = (placedCount[p.baseId] || 0) + 1; });
@@ -1174,6 +1275,7 @@ class Packer {
     applyStepView();
   }
   function placeOnePending(def) {
+    cancelBgPack();
     const item = { instanceId: 'manual-' + (state.nextId++), baseId: def.id, name: def.name, category: def.category, color: def.color, x: 0, y: 0, z: 0, l: def.l, w: def.w, h: def.h, isCylinder: def.isCylinder === true };
     if (!validPosition(item, item.instanceId) || !hasFullXZSupport(item, item.instanceId)) {
       const step = 50; let ok = false;
