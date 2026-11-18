@@ -56,6 +56,11 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
 .pend-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px; font-size: 11px; border: 1px dashed #d9dce0; border-radius: 4px; margin-bottom: 3px; cursor: pointer; }
 .pend-item:hover { border-color: #165dff; background: #f2f7ff; }
 .pend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #999; flex: none; }
+/* 集装箱预设：名称按钮 + 删除角标 */
+.preset-item { display: inline-flex; align-items: stretch; }
+.preset-item > .btn { border-radius: 4px 0 0 4px; }
+.preset-del { border: 1px solid #c9cdd4; border-left: none; border-radius: 0 4px 4px 0; background: #fff; color: #86909c; padding: 0 6px; cursor: pointer; font-size: 12px; line-height: 1.4; }
+.preset-del:hover { color: #f53f3f; border-color: #f53f3f; }
 </style>
 </head>
 <body>
@@ -70,10 +75,27 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
       </div>
       <div class="row btns">
         <button id="applyContainer" class="btn">应用</button>
-        <button class="btn" data-preset="589,235,239">20GP</button>
-        <button class="btn" data-preset="1200,235,239">40GP</button>
-        <button class="btn" data-preset="1200,235,269">40HC</button>
       </div>
+      <div class="row btns" id="presetRow"></div>
+      <div class="row btns">
+        <button id="addPreset" class="btn">+ 新增集装箱</button>
+      </div>
+      <div id="presetEditor" style="display:none;margin-top:6px;border-top:1px dashed #e5e6eb;padding-top:6px">
+        <div class="row">
+          <label>名称<input type="text" id="pName" placeholder="如 45HC"></label>
+        </div>
+        <div class="row">
+          <label>长(cm)<input type="number" id="pL" min="1"></label>
+          <label>宽(cm)<input type="number" id="pW" min="1"></label>
+          <label>高(cm)<input type="number" id="pH" min="1"></label>
+          <label>可用方(m³)<input type="number" id="pU" min="0" step="0.1" placeholder="选填"></label>
+        </div>
+        <div class="row btns">
+          <button id="presetSave" class="btn primary">保存</button>
+          <button id="presetCancel" class="btn">取消</button>
+        </div>
+      </div>
+      <p class="hint">点击预设名称可直接套用尺寸；点名称右侧 × 删除；「可用方」为实际可装载体积，用于统计区提示。</p>
     </section>
     <section class="block">
       <h2>货物清单</h2>
@@ -357,7 +379,7 @@ class Packer {
         boxes.push({ x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, level: c.level });
         placed.push({
           instanceId: m.it.instanceId, baseId: m.it.id, name: m.it.name, category: m.it.category, color: m.it.color,
-          x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, isCylinder: m.it.isCylinder === true, mustLoad: true,
+          x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, isCylinder: m.it.isCylinder === true, innerD: m.it.innerD || 0, mustLoad: true,
         });
       }
     });
@@ -390,7 +412,7 @@ class Packer {
         placed.push({
           instanceId: it.instanceId, baseId: it.id, name: it.name, category: it.category, color: it.color,
           x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h,
-          isCylinder: it.isCylinder === true, mustLoad: !!it.mustLoad,
+          isCylinder: it.isCylinder === true, innerD: it.innerD || 0, mustLoad: !!it.mustLoad,
         });
         remaining.splice(i, 1);
         i--;
@@ -572,17 +594,31 @@ class Packer {
   }
   buildContainer();
 
+  // 圆柱几何：外径 rOut、内径 rIn、高 h。
+  // 内径有效（0 < rIn < rOut）时用 LatheGeometry 生成带内壁、上下环形端面的空心管（轮胎/管件外观）；
+  // 否则退化为实心圆柱。碰撞与装箱仍按外径的方形包围盒计算。
+  function makeCylinderGeo(rOut, rIn, h) {
+    if (rIn > 0 && rIn < rOut) {
+      const pts = [
+        new THREE.Vector2(rIn, 0), new THREE.Vector2(rOut, 0),
+        new THREE.Vector2(rOut, h), new THREE.Vector2(rIn, h),
+        new THREE.Vector2(rIn, 0)
+      ];
+      return new THREE.LatheGeometry(pts, 48);
+    }
+    return new THREE.CylinderGeometry(rOut, rOut, h, 32);
+  }
   function makeBoxMesh(item) {
     const isCyl = item.isCylinder === true;
     // 圆柱默认绿色
     const color = isCyl && !item.color ? '#00b42a' : item.color;
     const geo = isCyl
-      ? new THREE.CylinderGeometry(Math.min(item.l, item.w) / 2, Math.min(item.l, item.w) / 2, item.h, 32)
+      ? makeCylinderGeo(item.l / 2, (item.innerD || 0) / 2, item.h)
       : new THREE.BoxGeometry(item.l, item.h, item.w);
     const mat = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.92 });
     const m = new THREE.Mesh(geo, mat);
     m.position.set(item.x + item.l / 2, item.y + item.h / 2, item.z + item.w / 2);
-    m.userData = { instanceId: item.instanceId, baseId: item.baseId, name: item.name, category: item.category, color, l: item.l, w: item.w, h: item.h, isCylinder: isCyl };
+    m.userData = { instanceId: item.instanceId, baseId: item.baseId, name: item.name, category: item.category, color, l: item.l, w: item.w, h: item.h, isCylinder: isCyl, innerD: item.innerD || 0 };
     const eg = isCyl ? null : new THREE.EdgesGeometry(geo);
     if (eg) m.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0x222222 })));
     return m;
@@ -596,7 +632,7 @@ class Packer {
       // 只更新位置会导致旧几何（如 l=87）配新坐标（l=157），视觉上一半穿到箱外
       if (m) {
         const u = m.userData;
-        const sameDim = u.l === it.l && u.w === it.w && u.h === it.h && !!u.isCylinder === (it.isCylinder === true);
+        const sameDim = u.l === it.l && u.w === it.w && u.h === it.h && (u.innerD || 0) === (it.innerD || 0) && !!u.isCylinder === (it.isCylinder === true);
         if (!sameDim) { scene.remove(m); meshByInst.delete(it.instanceId); m = null; }
       }
       if (!m) { m = makeBoxMesh(it); scene.add(m); meshByInst.set(it.instanceId, m); }
@@ -626,12 +662,12 @@ class Packer {
     const addMesh = (it, x, y, z, l, w, h) => {
       const isCyl = it.isCylinder === true;
       const geo = isCyl
-        ? new THREE.CylinderGeometry(Math.min(l, w) / 2, Math.min(l, w) / 2, h, 32)
+        ? makeCylinderGeo(l / 2, (it.innerD || 0) / 2, h)
         : new THREE.BoxGeometry(l, h, w);
       const mat = new THREE.MeshLambertMaterial({ color: it.color || '#888888', transparent: true, opacity: 0.45 });
       const m = new THREE.Mesh(geo, mat);
       m.position.set(x + l / 2, y + h / 2, z + w / 2);
-      m.userData = { instanceId: it.instanceId, baseId: it.baseId || it.id || it.instanceId.split('-')[0], name: it.name, category: it.category, color: it.color || '#888888', l, w, h, isCylinder: isCyl, unplaced: true };
+      m.userData = { instanceId: it.instanceId, baseId: it.baseId || it.id || it.instanceId.split('-')[0], name: it.name, category: it.category, color: it.color || '#888888', l, w, h, isCylinder: isCyl, innerD: it.innerD || 0, unplaced: true };
       if (!isCyl) {
         const eg = new THREE.EdgesGeometry(geo);
         m.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ color: 0xf53f3f })));
@@ -729,7 +765,7 @@ class Packer {
     const { L, W, H } = state.container;
     const item = { instanceId: ud.instanceId, baseId: ud.baseId, name: ud.name, category: ud.category, color: ud.color,
                    x: o.position.x - ud.l / 2, y: o.position.y - ud.h / 2, z: o.position.z - ud.w / 2,
-                   l: ud.l, w: ud.w, h: ud.h, isCylinder: ud.isCylinder === true };
+                   l: ud.l, w: ud.w, h: ud.h, isCylinder: ud.isCylinder === true, innerD: ud.innerD || 0 };
     // 箱外陈列的货物（未装入）也允许拖拽：拖进箱内则转为已装箱
     const isUnplaced = ud.unplaced === true || !state.placed.some(x => x.instanceId === item.instanceId);
     // 判断是否在箱内（XZ 完全在容器范围内）
@@ -783,7 +819,7 @@ class Packer {
         // 箱外货物拖入箱内：从"未装入"移除，转为已装箱（去掉半透明红描边，换成正常货箱外观）
         state.unplaced = (state.unplaced || []).filter(u => u.instanceId !== item.instanceId);
         const entry = { instanceId: item.instanceId, baseId: ud.baseId, name: ud.name, category: ud.category, color: ud.color,
-                        x: final.x, y: final.y, z: final.z, l: ud.l, w: ud.w, h: ud.h, isCylinder: ud.isCylinder === true };
+                        x: final.x, y: final.y, z: final.z, l: ud.l, w: ud.w, h: ud.h, isCylinder: ud.isCylinder === true, innerD: ud.innerD || 0 };
         state.placed.push(entry);
         scene.remove(o); unplacedMeshes.delete(item.instanceId);
         const nm = makeBoxMesh(entry); scene.add(nm); meshByInst.set(entry.instanceId, nm);
@@ -893,12 +929,17 @@ class Packer {
       const enabled = inputs[0].checked;
       const name = (inputs[1].value || '货物' + i).trim();
       const category = inputs[2].value;
-      const l = +inputs[3].value || 0, w = +inputs[4].value || 0, h = +inputs[5].value || 0;
+      const lIn = +inputs[3].value || 0, wIn = +inputs[4].value || 0, h = +inputs[5].value || 0;
       const qty = Math.max(1, +inputs[6].value || 1);
       const color = inputs[7].value;
-      const isCylinder = inputs[9].checked;
       const mustLoad = inputs[8].checked;
-      if (l > 0 && w > 0 && h > 0) defs.push({ id: tr.dataset.id, name, category, l, w, h, qty, color, isCylinder, mustLoad, enabled });
+      const isCylinder = inputs[9].checked;
+      // 圆柱货物：长=外径、宽=内径（可留空=实心）。装箱占地一律按外径×外径，
+      // 内径只用于 3D 镂空渲染，不参与碰撞/支撑计算
+      const innerD = isCylinder && wIn > 0 && wIn < lIn ? wIn : 0;
+      const l = lIn, w = isCylinder ? lIn : wIn;
+      const ok = isCylinder ? (l > 0 && h > 0) : (l > 0 && w > 0 && h > 0);
+      if (ok) defs.push({ id: tr.dataset.id, name, category, l, w, h, innerD, qty, color, isCylinder, mustLoad, enabled });
     });
     state.cargoDef = defs; return defs;
   }
@@ -922,17 +963,29 @@ class Packer {
     const c = def.color || catDefaultColor[cat] || colors[Math.floor(Math.random() * colors.length)];
     const catOpts = ['纸箱', '木箱', '导轨'].map(o => `<option value="${o}" ${o === cat ? 'selected' : ''}>${o}</option>`).join('');
     const mustChk = def.mustLoad ? 'checked' : '';
-    tr.innerHTML = `<td class="chk-cell"><input type="checkbox" ${visChk} title="取消勾选=自动装箱时不考虑此货物"></td><td><input type="text" value="${name}" class="name-input"></td><td><select>${catOpts}</select></td><td><input type="number" value="${def.l || ''}"></td><td><input type="number" value="${def.w || ''}"></td><td><input type="number" value="${def.h || ''}"></td><td><input type="number" value="${def.qty || 1}" min="1"></td><td><input type="color" value="${c}"></td><td class="chk-cell"><input type="checkbox" ${mustChk} title="勾选=优先安排装箱（如导轨等必须装走的货物）；超长件会自动贴侧墙顺长边纵码"></td><td class="chk-cell"><input type="checkbox" ${cylChk} title="勾选=圆柱体外观（碰撞仍按长方体）"></td><td><button class="btn" data-act="del">×</button></td>`;
+    // 圆柱回填：宽列显示内径（没有内径则留空，表示实心）
+    const wInit = def.isCylinder ? (def.innerD || '') : (def.w || '');
+    tr.innerHTML = `<td class="chk-cell"><input type="checkbox" ${visChk} title="取消勾选=自动装箱时不考虑此货物"></td><td><input type="text" value="${name}" class="name-input"></td><td><select>${catOpts}</select></td><td><input type="number" value="${def.l || ''}"></td><td><input type="number" value="${wInit}"></td><td><input type="number" value="${def.h || ''}"></td><td><input type="number" value="${def.qty || 1}" min="1"></td><td><input type="color" value="${c}"></td><td class="chk-cell"><input type="checkbox" ${mustChk} title="勾选=优先安排装箱（如导轨等必须装走的货物）；超长件会自动贴侧墙顺长边纵码"></td><td class="chk-cell"><input type="checkbox" ${cylChk} title="勾选=圆柱体：长填外径、宽填内径（留空为实心）；碰撞仍按外径方形包围盒"></td><td><button class="btn" data-act="del">×</button></td>`;
     tr.querySelector('[data-act=del]').onclick = () => { tr.remove(); scheduleAutoSave(); };
     // 名称输入框根据内容自动调整宽度（紧贴内容，不占多余空间）
     const nameIn = tr.querySelector('.name-input');
     const fitName = () => { nameIn.style.width = Math.max(24, nameIn.value.length * 12 + 10) + 'px'; };
     nameIn.addEventListener('input', fitName);
     fitName();
-    // 勾选圆柱时默认颜色设为绿色（用户可再改）
-    const cylCb = tr.querySelectorAll('input')[7];
+    // 勾选圆柱时：默认颜色设为绿色，并把长/宽提示切换为"外径/内径"
+    // 注意 querySelectorAll('input') 不含 select，索引为 2=长 3=宽 6=颜色 8=圆柱
+    const cylCb = tr.querySelectorAll('input')[8];
     const colorIn = tr.querySelectorAll('input')[6];
-    cylCb.addEventListener('change', () => { if (cylCb.checked) colorIn.value = '#00b42a'; });
+    const lInEl = tr.querySelectorAll('input')[2];
+    const wInEl = tr.querySelectorAll('input')[3];
+    const syncCylHint = () => {
+      const on = cylCb.checked;
+      lInEl.title = on ? '外径（cm）' : '长（cm）';
+      wInEl.title = on ? '内径（cm），留空表示实心' : '宽（cm）';
+      wInEl.placeholder = on ? '内径' : '';
+    };
+    cylCb.addEventListener('change', () => { if (cylCb.checked) colorIn.value = '#00b42a'; syncCylHint(); });
+    syncCylHint();
     // 切换类别时应用对应默认颜色（纸箱=橙色，木箱=浅木色，导轨=蓝色）
     const catSel = tr.querySelector('select');
     catSel.addEventListener('change', () => {
@@ -1076,16 +1129,83 @@ class Packer {
   // 货物清单任意单元格修改（名称/尺寸/数量/颜色/类别/勾选）都自动保存
   $('cargoBody').addEventListener('input', scheduleAutoSave);
   $('cargoBody').addEventListener('change', scheduleAutoSave);
-  // 常用集装箱尺寸预设
-  document.querySelectorAll('[data-preset]').forEach(btn => {
-    btn.onclick = () => {
-      const [l, w, h] = btn.dataset.preset.split(',').map(Number);
-      $('cW').value = l; $('cD').value = w; $('cH').value = h;
-      state.container = { L: l, W: w, H: h };
-      buildContainer(); setDragMode(state.mode === 'manual');
-      scheduleAutoSave(); refreshUI();
-    };
-  });
+  // ---- 集装箱预设（名称 + 尺寸 + 实际可用方，用户可自行新增/删除，存 localStorage）----
+  const PRESET_KEY = 'container_presets_v1';
+  const DEFAULT_PRESETS = [
+    { name: '20GP', L: 589, W: 235, H: 239, usable: 27 },
+    { name: '40GP', L: 1200, W: 235, H: 239, usable: 57 },
+    { name: '40HC', L: 1200, W: 235, H: 269, usable: 67 }
+  ];
+  let containerPresets = (() => {
+    try {
+      const raw = localStorage.getItem(PRESET_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) { /* ignore */ }
+    return DEFAULT_PRESETS.map(p => ({ ...p }));
+  })();
+  function savePresets() {
+    try { localStorage.setItem(PRESET_KEY, JSON.stringify(containerPresets)); } catch (e) { console.warn('保存集装箱预设失败', e); }
+  }
+  function renderPresets() {
+    const box = $('presetRow');
+    box.innerHTML = '';
+    if (!containerPresets.length) {
+      box.innerHTML = '<span class="hint" style="margin:0">暂无预设，点击下方「新增集装箱」添加</span>';
+      return;
+    }
+    containerPresets.forEach((p, i) => {
+      const wrap = document.createElement('span');
+      wrap.className = 'preset-item';
+      const b = document.createElement('button');
+      b.className = 'btn';
+      b.textContent = p.name;
+      b.title = `${p.L}×${p.W}×${p.H} cm${p.usable != null ? ` · 可用 ${p.usable} m³` : ''}（点击套用）`;
+      b.onclick = () => applyPreset(p);
+      const del = document.createElement('span');
+      del.className = 'preset-del';
+      del.textContent = '×';
+      del.title = '删除该预设';
+      del.onclick = e => {
+        e.stopPropagation();
+        if (!confirm(`删除集装箱预设「${p.name}」？`)) return;
+        containerPresets.splice(i, 1); savePresets(); renderPresets(); refreshUI();
+      };
+      wrap.appendChild(b); wrap.appendChild(del);
+      box.appendChild(wrap);
+    });
+  }
+  function applyPreset(p) {
+    $('cW').value = p.L; $('cD').value = p.W; $('cH').value = p.H;
+    state.container = { L: p.L, W: p.W, H: p.H };
+    buildContainer(); setDragMode(state.mode === 'manual');
+    scheduleAutoSave(); refreshUI();
+  }
+  // 当前尺寸命中的预设（用于统计区显示"实际装箱可用方"）
+  function findPreset(L, W, H) {
+    return containerPresets.find(p => Math.round(p.L) === Math.round(L) && Math.round(p.W) === Math.round(W) && Math.round(p.H) === Math.round(H)) || null;
+  }
+  renderPresets();
+  $('addPreset').onclick = () => {
+    $('presetEditor').style.display = '';
+    $('pName').value = '';
+    $('pL').value = state.container.L; $('pW').value = state.container.W; $('pH').value = state.container.H;
+    $('pU').value = '';
+    $('pName').focus();
+  };
+  $('presetCancel').onclick = () => { $('presetEditor').style.display = 'none'; };
+  $('presetSave').onclick = () => {
+    const name = ($('pName').value || '').trim();
+    const L = Math.round(+$('pL').value), W = Math.round(+$('pW').value), H = Math.round(+$('pH').value);
+    if (!name) { alert('请填写集装箱名称'); return; }
+    if (!(L > 0 && W > 0 && H > 0)) { alert('长、宽、高都必须为正数'); return; }
+    if (containerPresets.some(p => p.name === name)) { alert(`已存在名为「${name}」的预设，请换个名称`); return; }
+    const uRaw = ($('pU').value || '').trim();
+    const usable = uRaw === '' ? null : Math.max(0, +uRaw);
+    const p = { name, L, W, H, usable };
+    containerPresets.push(p); savePresets(); renderPresets();
+    $('presetEditor').style.display = 'none';
+    applyPreset(p);
+  };
   $('applyContainer').onclick = () => {
     state.container = { L: +$('cW').value, W: +$('cD').value, H: +$('cH').value };
     buildContainer(); setDragMode(state.mode === 'manual');
@@ -1123,7 +1243,7 @@ class Packer {
     setTimeout(() => driveBgPack(task), 0);
   };
   function toPlaced(arr) {
-    return arr.map(p => ({ instanceId: p.instanceId, baseId: p.baseId, name: p.name, category: p.category, color: p.color, x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, isCylinder: p.isCylinder === true }));
+    return arr.map(p => ({ instanceId: p.instanceId, baseId: p.baseId, name: p.name, category: p.category, color: p.color, x: p.x, y: p.y, z: p.z, l: p.l, w: p.w, h: p.h, isCylinder: p.isCylinder === true, innerD: p.innerD || 0 }));
   }
   // 分批驱动后台精算生成器：每片最多占用主线程约 30ms，其余时间交还给 UI，
   // 避免 1000+ 件散货因单次计算过久导致"页面无响应"
@@ -1237,18 +1357,12 @@ class Packer {
     setDragMode(state.mode === 'manual'); refreshUI();
   };
 
-  // 实际装箱可用方（行业经验值：扣除箱体结构、门框、绑扎空间后可实际装载的体积）
-  // 键为集装箱内尺寸（长x宽x高 cm），与三个预设按钮一一对应
-  const USABLE_VOLUME = {
-    '589x235x239': 27,   // 20GP
-    '1200x235x239': 57,  // 40GP
-    '1200x235x269': 67   // 40HQ(40HC)
-  };
-
   function refreshUI() {
     const { L, W, H } = state.container;
     const volC = L * W * H;
-    const usable = USABLE_VOLUME[`${Math.round(L)}x${Math.round(W)}x${Math.round(H)}`];
+    // 实际装箱可用方：来自命中的集装箱预设（用户新增预设时可填写）
+    const curPreset = findPreset(L, W, H);
+    const usable = curPreset && curPreset.usable != null ? curPreset.usable : null;
     const used = state.placed.reduce((s, p) => s + p.l * p.w * p.h, 0);
     const rate = volC ? (used / volC * 100).toFixed(1) : 0;
     const defs = (state.cargoDef.length ? state.cargoDef : readCargoRows()).filter(d => d.enabled !== false);
@@ -1276,7 +1390,7 @@ class Packer {
   }
   function placeOnePending(def) {
     cancelBgPack();
-    const item = { instanceId: 'manual-' + (state.nextId++), baseId: def.id, name: def.name, category: def.category, color: def.color, x: 0, y: 0, z: 0, l: def.l, w: def.w, h: def.h, isCylinder: def.isCylinder === true };
+    const item = { instanceId: 'manual-' + (state.nextId++), baseId: def.id, name: def.name, category: def.category, color: def.color, x: 0, y: 0, z: 0, l: def.l, w: def.w, h: def.h, isCylinder: def.isCylinder === true, innerD: def.innerD || 0 };
     if (!validPosition(item, item.instanceId) || !hasFullXZSupport(item, item.instanceId)) {
       const step = 50; let ok = false;
       for (let y = 0; y <= state.container.H - item.h && !ok; y += step)
