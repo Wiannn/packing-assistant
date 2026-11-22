@@ -64,6 +64,16 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
 .preset-item > .btn { border-radius: 4px 0 0 4px; }
 .preset-del { border: 1px solid #c9cdd4; border-left: none; border-radius: 0 4px 4px 0; background: #fff; color: #86909c; padding: 0 6px; cursor: pointer; font-size: 12px; line-height: 1.4; }
 .preset-del:hover { color: #f53f3f; border-color: #f53f3f; }
+/* 批量录入面板 */
+#bulkPanel { margin-top: 8px; border-top: 1px dashed #e5e6eb; padding-top: 8px; }
+#bulkText { width: 100%; height: 120px; padding: 6px; font-size: 12px; font-family: Consolas, "Courier New", monospace; border: 1px solid #d9dce0; border-radius: 4px; resize: vertical; white-space: pre; overflow: auto; }
+#bulkPreviewBox { margin-top: 6px; max-height: 220px; overflow: auto; }
+#bulkPreviewBox table { width: 100%; border-collapse: collapse; font-size: 11px; }
+#bulkPreviewBox th, #bulkPreviewBox td { border: 1px solid #e5e6eb; padding: 2px 4px; text-align: center; white-space: nowrap; }
+#bulkPreviewBox th { background: #f2f3f5; }
+#bulkPreviewBox tr.err td { background: #ffece8; color: #cb2634; }
+#bulkPreviewBox tr.warn td { background: #fff7e8; }
+#bulkResult { margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -117,9 +127,27 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
       </table>
       <div class="row btns">
         <button id="addCargo" class="btn">+ 添加货物</button>
+        <button id="bulkImport" class="btn">批量录入</button>
         <button id="saveCargo" class="btn">保存清单</button>
         <button id="autoPack" class="btn primary">自动装箱</button>
         <button id="clearBox" class="btn">清空装箱</button>
+      </div>
+      <div id="bulkPanel" style="display:none">
+        <textarea id="bulkText" placeholder="从 Excel 直接复制粘贴，或用 Tab / 逗号 / 空格分隔。列顺序：
+名称  类别  长  宽  高  数量  颜色  必装  圆柱
+导轨  导轨  600  20  15  40
+木箱  木箱  270  40  42  12
+纸箱  纸箱  60  40  30  200
+轮胎  纸箱  80  45  30  4  #00b42a  是  是
+（后 3 列可省略；勾圆柱时「宽」列填内径，留空为实心）"></textarea>
+        <div class="row btns">
+          <button id="bulkPreview" class="btn">解析预览</button>
+          <button id="bulkAppend" class="btn primary">追加到清单</button>
+          <button id="bulkReplace" class="btn">清空后替换</button>
+          <button id="bulkClose" class="btn">收起</button>
+        </div>
+        <div id="bulkPreviewBox"></div>
+        <div id="bulkResult" class="hint"></div>
       </div>
     </section>
     <section class="block">
@@ -1175,7 +1203,128 @@ class Packer {
       else if (catSel.value === '导轨') colorIn.value = '#0055FF';
     });
     $('cargoBody').appendChild(tr);
+    return tr;
   }
+  // ---- 清单批量录入（粘贴 Tab/逗号分隔文本）----
+  const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  function normCell(s) {
+    return String(s == null ? '' : s)
+      .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+      .replace(/\u3000/g, ' ')
+      .trim();
+  }
+  function parseFlag(v) { return /^(是|有|y|yes|true|1|√|✓)$/i.test(normCell(v)); }
+  function parseBulkText(text) {
+    const rows = [];
+    String(text || '').split(/\r?\n/).forEach((raw, idx) => {
+      if (!raw.trim()) return;
+      let cells;
+      if (raw.includes('\t')) cells = raw.split('\t');
+      else if (raw.includes('|')) cells = raw.split('|');
+      else cells = raw.split(/[,，;；]+/);
+      cells = cells.map(normCell);
+      // 空格分隔容错：仅当整行没被拆开，且按空格切开后第3~5列都是数字（长宽高）时才采用
+      if (cells.length === 1) {
+        const sp = raw.split(/\s+/).filter(Boolean);
+        if (sp.length >= 6 && [2, 3, 4].every(i => /^\d+(\.\d+)?$/.test(normCell(sp[i])))) cells = sp.map(normCell);
+      }
+      if (/^(名称|name|货名)$/i.test(cells[0] || '')) return; // 跳过表头行
+      const [nameRaw, catRaw, lRaw, wRaw, hRaw, qRaw, colorRaw, mustRaw, cylRaw] = cells;
+      const errs = [], warns = [];
+      const row = { line: idx + 1, name: nameRaw || '', category: '纸箱', l: 0, w: 0, h: 0, innerD: 0, qty: 1, color: '', mustLoad: false, isCylinder: false, errs, warns };
+      if (!nameRaw) { errs.push('缺少名称'); row.name = '货物' + (rows.length + 1); }
+      // 类别：纸箱 / 木箱 / 导轨
+      const cr = catRaw || '';
+      if (!cr) row.category = '纸箱';
+      else if (/导轨|guide|rail/i.test(cr)) row.category = '导轨';
+      else if (/木|wood|托盘|pallet/i.test(cr)) row.category = '木箱';
+      else if (/纸|carton|box|card/i.test(cr)) row.category = '纸箱';
+      else { warns.push('类别「' + cr + '」未识别，按纸箱处理'); row.category = '纸箱'; }
+      const num = v => { const n = parseFloat(String(v).replace(/[^\d.\-]/g, '')); return isFinite(n) ? n : NaN; };
+      row.l = num(lRaw); row.w = num(wRaw); row.h = num(hRaw);
+      if (!(row.l > 0)) errs.push('长(外径)必须为正数');
+      if (!(row.h > 0)) errs.push('高必须为正数');
+      row.isCylinder = parseFlag(cylRaw);
+      if (row.isCylinder) {
+        row.innerD = isFinite(row.w) && row.w > 0 ? row.w : 0;
+        if (row.innerD > 0 && row.innerD >= row.l) errs.push('内径需小于外径');
+      } else if (!(row.w > 0)) {
+        errs.push('宽必须为正数');
+      }
+      const q = parseInt(normCell(qRaw) || '1', 10);
+      if (!isFinite(q) || q < 1) { warns.push('数量无效，按 1 处理'); row.qty = 1; } else row.qty = q;
+      // 颜色：支持 #hex 或颜色名，留空自动配色
+      const cRaw = normCell(colorRaw || '');
+      if (cRaw) {
+        if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(cRaw) || /^[a-z]{3,20}$/i.test(cRaw)) row.color = cRaw;
+        else warns.push('颜色「' + cRaw + '」无效，已自动配色');
+      }
+      row.mustLoad = parseFlag(mustRaw);
+      rows.push(row);
+    });
+    return rows;
+  }
+  function renderBulkPreview(rows) {
+    const box = $('bulkPreviewBox');
+    if (!rows.length) { box.innerHTML = '<div class="hint">没有解析到数据行</div>'; return; }
+    const good = rows.filter(r => !r.errs.length).length;
+    box.innerHTML = '<table><thead><tr><th>行</th><th>名称</th><th>类别</th><th>长/外径</th><th>宽/内径</th><th>高</th><th>数量</th><th>颜色</th><th>必装</th><th>圆柱</th><th>说明</th></tr></thead><tbody>' +
+      rows.map(r => '<tr class="' + (r.errs.length ? 'err' : (r.warns.length ? 'warn' : '')) + '">' +
+        '<td>' + r.line + '</td><td>' + escHtml(r.name) + '</td><td>' + escHtml(r.category) + '</td>' +
+        '<td>' + (r.l || '-') + '</td><td>' + (r.isCylinder ? (r.innerD || '实心') : (r.w || '-')) + '</td>' +
+        '<td>' + (r.h || '-') + '</td><td>' + r.qty + '</td>' +
+        '<td>' + (r.color ? '<span style="display:inline-block;width:10px;height:10px;border:1px solid #999;background:' + escHtml(r.color) + '"></span>' : '自动') + '</td>' +
+        '<td>' + (r.mustLoad ? '是' : '') + '</td><td>' + (r.isCylinder ? '是' : '') + '</td>' +
+        '<td style="text-align:left">' + escHtml(r.errs.join('；') || r.warns.join('；') || 'OK') + '</td></tr>').join('') +
+      '</tbody></table><div class="hint">共 ' + rows.length + ' 行，可写入 ' + good + ' 行' + (rows.length > good ? '，' + (rows.length - good) + ' 行有错误需修正' : '') + '</div>';
+  }
+  function bulkKey(d) { return [d.name, d.category, d.l, d.h, d.isCylinder ? 1 : 0, d.isCylinder ? (d.innerD || 0) : d.w].join('|'); }
+  function writeBulkRows(rows, replace) {
+    const bad = rows.filter(r => r.errs.length);
+    if (bad.length) {
+      renderBulkPreview(rows);
+      $('bulkResult').textContent = '有 ' + bad.length + ' 行存在错误（红底），本次未写入任何数据，请修正后重试。';
+      return;
+    }
+    if (!rows.length) { $('bulkResult').textContent = '没有可写入的数据行。'; return; }
+    if (replace) $('cargoBody').innerHTML = '';
+    // 一次性读取现有行做索引，避免逐行读 DOM（批量上千行时更快）
+    const index = new Map(readCargoRows().map(d => [bulkKey(d), d]));
+    let added = 0, merged = 0;
+    rows.forEach(r => {
+      const def = { name: r.name, category: r.category, l: r.l, w: r.isCylinder ? r.l : r.w, h: r.h, innerD: r.innerD, qty: r.qty, color: r.color, mustLoad: r.mustLoad, isCylinder: r.isCylinder };
+      // 与清单中已有的相同规格行合并数量（名称+类别+长+宽/内径+高+圆柱）
+      const dup = index.get(bulkKey(def));
+      if (dup) {
+        const tr = $('cargoBody').querySelector('tr[data-id="' + dup.id + '"]');
+        const qtyIn = tr && tr.querySelectorAll('input, select')[6];
+        if (qtyIn) { qtyIn.value = (parseInt(qtyIn.value, 10) || 0) + r.qty; dup.qty += r.qty; merged++; return; }
+      }
+      const tr = addCargoRow(def);
+      if (tr) index.set(bulkKey(def), { ...def, id: tr.dataset.id });
+      added++;
+    });
+    refreshUI();
+    scheduleAutoSave();
+    renderBulkPreview(rows);
+    $('bulkResult').textContent = (replace ? '已替换为 ' : '已追加 ') + rows.length + ' 行（新增 ' + added + ' 行' + (merged ? '，合并重复 ' + merged + ' 行' : '') + '）。如需按新清单重新排布，请点「自动装箱」。';
+  }
+  $('bulkImport').onclick = () => {
+    const p = $('bulkPanel');
+    p.style.display = (p.style.display === 'none' || !p.style.display) ? 'block' : 'none';
+  };
+  $('bulkClose').onclick = () => { $('bulkPanel').style.display = 'none'; };
+  $('bulkPreview').onclick = () => {
+    const rows = parseBulkText($('bulkText').value);
+    renderBulkPreview(rows);
+    $('bulkResult').textContent = rows.length ? '' : '没有识别到有效数据，请确认用 Tab 或逗号分列。';
+  };
+  $('bulkAppend').onclick = () => writeBulkRows(parseBulkText($('bulkText').value), false);
+  $('bulkReplace').onclick = () => {
+    if (!$('cargoBody').querySelector('tr') || confirm('清空当前清单的全部货物行，再写入粘贴的数据？')) {
+      writeBulkRows(parseBulkText($('bulkText').value), true);
+    }
+  };
   // ---- 承重等级面板 ----
   function renderLevelRules() {
     $('levelRules').innerHTML = Object.keys(state.catLevel).map(cat =>
