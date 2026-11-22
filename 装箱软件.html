@@ -51,6 +51,9 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
 #viewer { flex: 1; position: relative; background: #e8eaf0; overflow: hidden; }
 #three-canvas { display: block; width: 100%; height: 100%; }
 .toolbar { position: absolute; top: 8px; left: 8px; z-index: 10; background: rgba(255,255,255,.85); padding: 4px 10px; border-radius: 4px; }
+    .view-btns { margin-left: 10px; display: inline-flex; gap: 4px; align-items: center; }
+    .view-btns .btn { padding: 2px 8px; }
+    .view-btn.active { background: #165dff; color: #fff; border-color: #165dff; }
 .pending { position: absolute; top: 8px; right: 8px; z-index: 10; width: 180px; background: rgba(255,255,255,.9); border: 1px solid #e5e6eb; border-radius: 6px; padding: 6px; max-height: 60vh; overflow-y: auto; }
 .pending-title { font-size: 11px; color: #86909c; margin-bottom: 4px; }
 .pend-item { display: flex; align-items: center; gap: 6px; padding: 3px 4px; font-size: 11px; border: 1px dashed #d9dce0; border-radius: 4px; margin-bottom: 3px; cursor: pointer; }
@@ -159,7 +162,16 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
     </section>
   </aside>
   <main id="viewer">
-    <div class="toolbar"><span id="cursorInfo" class="hint">待装箱货物：0 / 已装箱：0</span></div>
+    <div class="toolbar">
+      <span id="cursorInfo" class="hint">待装箱货物：0 / 已装箱：0</span>
+      <span class="view-btns">
+        <button class="btn view-btn" data-view="free">立体</button>
+        <button class="btn view-btn" data-view="top">俯视</button>
+        <button class="btn view-btn" data-view="side">侧视</button>
+        <button class="btn view-btn" data-view="door">门口</button>
+        <button class="btn" id="viewReset">重置视角</button>
+      </span>
+    </div>
     <div id="pendingWrap" class="pending">
       <div class="pending-title">待装箱货物（手动模式点击放入）</div>
       <div id="pendingList"></div>
@@ -649,6 +661,51 @@ class Packer {
   const controls = new THREE.OrbitControls(camera, viewEl);
   controls.enableDamping = true;
 
+  // 正交相机：俯视 / 侧视 / 门口正视，没有透视变形，判断"某层是否居中、哪里有空隙"更准
+  const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 1_000_000);
+  let viewMode = 'free'; // free | top | side | door
+  let dragCtl = null;    // 手动拖拽控制器（正交视角下禁用，切回立体再拖）
+  function updateOrthoFrustum() {
+    const aspect = (viewEl.clientWidth || 1) / (viewEl.clientHeight || 1);
+    const { L, W, H } = state.container;
+    let halfW, halfH;
+    if (viewMode === 'top') { halfW = L / 2; halfH = W / 2; }        // 俯视：长 × 宽
+    else if (viewMode === 'side') { halfW = L / 2; halfH = H / 2; }  // 侧视：长 × 高
+    else { halfW = W / 2; halfH = H / 2; }                           // 门口：宽 × 高
+    halfW *= 1.12; halfH *= 1.12; // 四周留边
+    if (halfW / halfH > aspect) halfH = halfW / aspect; else halfW = halfH * aspect;
+    orthoCam.left = -halfW; orthoCam.right = halfW; orthoCam.top = halfH; orthoCam.bottom = -halfH;
+    orthoCam.updateProjectionMatrix();
+  }
+  function setView(mode) {
+    viewMode = mode;
+    const { L, W, H } = state.container;
+    const cx = L / 2, cy = H / 2, cz = W / 2;
+    controls.enabled = (mode === 'free'); // 正交视角固定，不允许拖动旋转
+    if (dragCtl) dragCtl.enabled = (mode === 'free'); // 正交视角下禁用拖拽（DragControls 按透视投影计算，会拖偏）
+    if (mode === 'free') {
+      const d = Math.max(L, W, H) * 1.6;
+      camera.position.set(L * 0.9, H * 1.8, W * 1.5 + d * 0.4);
+      controls.target.set(cx, cy, cz);
+      controls.update();
+    } else {
+      updateOrthoFrustum();
+      const dist = Math.max(L, W, H) * 3;
+      if (mode === 'top') {
+        orthoCam.up.set(0, 0, -1);       // 画面：x 向右（门在左），z 向下
+        orthoCam.position.set(cx, cy + dist, cz);
+      } else if (mode === 'side') {
+        orthoCam.up.set(0, 1, 0);
+        orthoCam.position.set(cx, cy, cz + dist); // 从右侧墙外看长 × 高
+      } else {
+        orthoCam.up.set(0, 1, 0);
+        orthoCam.position.set(cx - dist, cy, cz); // 从门口正面看宽 × 高
+      }
+      orthoCam.lookAt(cx, cy, cz);
+    }
+    document.querySelectorAll('.view-btn').forEach(b => b.classList.toggle('active', b.dataset.view === mode));
+  }
+
   scene.add(new THREE.AmbientLight(0xffffff, 0.7));
   const dir = new THREE.DirectionalLight(0xffffff, 0.7);
   dir.position.set(1, 2, 1); scene.add(dir);
@@ -705,6 +762,7 @@ class Packer {
     camera.position.set(L * 0.9, H * 1.8, W * 1.5 + d * 0.4);
     controls.target.set(L / 2, H / 2, W / 2);
     controls.update();
+    if (typeof setView === 'function') setView('free'); // 换箱型后回到立体视角，避免正交画面错位
   }
   buildContainer();
 
@@ -863,6 +921,7 @@ class Packer {
 
   const dragObjs = [];
   const drag = new THREE.DragControls(dragObjs, camera, viewEl);
+  dragCtl = drag;
   let dragStartPos = null;
   drag.addEventListener('dragstart', e => { cancelBgPack(); state.selected = e.object; controls.enabled = false; dragStartPos = e.object.position.clone(); highlightSelection(); });
   drag.addEventListener('drag', e => {
@@ -874,7 +933,7 @@ class Packer {
     o.position.y = y + ud.h / 2;
   });
   drag.addEventListener('dragend', e => {
-    controls.enabled = true;
+    controls.enabled = (viewMode === 'free'); // 正交视角下恢复后仍锁定旋转
     const o = e.object, ud = o.userData;
     const { L, W, H } = state.container;
     const item = { instanceId: ud.instanceId, baseId: ud.baseId, name: ud.name, category: ud.category, color: ud.color,
@@ -987,7 +1046,7 @@ class Packer {
     const rect = viewEl.getBoundingClientRect();
     mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
+    raycaster.setFromCamera(mouse, viewMode === 'free' ? camera : orthoCam);
     const hits = raycaster.intersectObjects([...meshByInst.values(), ...unplacedMeshes.values()]);
     if (hits.length) { state.selected = hits[0].object; highlightSelection(); focusCargoRow(state.selected.userData.baseId); }
     else { state.selected = null; highlightSelection(); }
@@ -1014,7 +1073,7 @@ class Packer {
     const rect = viewEl.getBoundingClientRect();
     mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(mouse, camera);
+    raycaster.setFromCamera(mouse, viewMode === 'free' ? camera : orthoCam);
     const hits = raycaster.intersectObjects([...meshByInst.values()]);
     if (hits.length) {
       state.selected = hits[0].object;
@@ -1029,12 +1088,20 @@ class Packer {
     renderer.setSize(r.width, r.height, false);
     camera.aspect = r.width / r.height;
     camera.updateProjectionMatrix();
+    if (viewMode !== 'free') updateOrthoFrustum();
   }
   window.addEventListener('resize', resize);
   resize();
-  (function animate() { requestAnimationFrame(animate); controls.update(); if (renderer) renderer.render(scene, camera); })();
+  (function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    if (renderer) renderer.render(scene, viewMode === 'free' ? camera : orthoCam);
+  })();
 
   const $ = id => document.getElementById(id);
+  // 3D 视角切换
+  document.querySelectorAll('.view-btn').forEach(b => b.onclick = () => setView(b.dataset.view));
+  $('viewReset').onclick = () => setView('free');
   function readCargoRows() {
     const rows = [...$('cargoBody').querySelectorAll('tr')];
     const defs = [];
