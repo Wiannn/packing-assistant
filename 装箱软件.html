@@ -393,6 +393,7 @@ class Packer {
       if (!groups.has(it.id)) groups.set(it.id, []);
       groups.get(it.id).push(it);
     }
+    const colCount = boxes.length; // 侧墙导轨列的箱子数量（不参与横向居中）
     const groupList = [...groups.values()];
     groupList.sort((a, b) => ((b[0].mustLoad ? 1 : 0) - (a[0].mustLoad ? 1 : 0)) || ((b[0].l * b[0].w * b[0].h) - (a[0].l * a[0].w * a[0].h)));
     const remaining = groupList.flat();
@@ -421,7 +422,69 @@ class Packer {
       if (!progress) break;
     }
 
+    // 防偏载：各层在宽度方向尽量居中（导轨列保持贴墙不动）
+    this._centerLayers(placed, boxes, colCount);
     return { placed, unplaced: remaining };
+  }
+  // 防偏载：同一高度层若没有铺满箱宽，把整层沿 z 平移，使该层在宽度方向居中，
+  // 避免"货少时全堆一侧"造成左右重心偏移。
+  // 平移量先用理想居中值；若因碰撞/支撑不通过，则二分收缩到"可行的最大居中量"，
+  // 让每层在不悬空、不穿模的前提下尽量靠近中线。
+  // skip：侧墙导轨列的箱子数量——这些必须贴墙，不参与居中。
+  _centerLayers(placed, boxes, skip) {
+    const groups = new Map();
+    for (let i = skip; i < boxes.length; i++) {
+      const key = Math.round(boxes[i].y * 1000) / 1000;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(i);
+    }
+    for (const key of [...groups.keys()].sort((a, b) => a - b)) { // 从低层往高层
+      const idxs = groups.get(key);
+      let zmin = Infinity, zmax = -Infinity;
+      for (const i of idxs) {
+        const b = boxes[i];
+        if (b.z < zmin) zmin = b.z;
+        if (b.z + b.w > zmax) zmax = b.z + b.w;
+      }
+      const span = zmax - zmin;
+      if (span >= this.W - 1e-6) continue; // 已铺满，无需平移
+      const ideal = (this.W - span) / 2 - zmin; // 完全居中的平移量
+      if (Math.abs(ideal) < 1e-6) continue;
+      const inGroup = new Set(idxs);
+      // 试平移 s：越界、与层外箱子碰撞、支撑覆盖率任一不通过即不可行
+      const feasible = s => {
+        for (const i of idxs) boxes[i].z += s;
+        let ok = true;
+        for (const i of idxs) {
+          const b = boxes[i];
+          if (b.z < -1e-6 || b.z + b.w > this.W + 1e-6) { ok = false; break; }
+          for (let j = 0; j < boxes.length; j++) {
+            if (inGroup.has(j)) continue;
+            const o = boxes[j];
+            if (o.y + o.h <= b.y + 1e-6 || o.y >= b.y + b.h - 1e-6) continue; // 竖直不重叠则无关
+            if (Math.min(b.x + b.l, o.x + o.l) - Math.max(b.x, o.x) > 1e-6 &&
+                Math.min(b.z + b.w, o.z + o.w) - Math.max(b.z, o.z) > 1e-6) { ok = false; break; }
+          }
+          if (ok && b.y > 1e-6 && !this._supported3D(b, boxes, b.level)) ok = false;
+          if (!ok) break;
+        }
+        for (const i of idxs) boxes[i].z -= s; // 还原，由调用方决定是否落地
+        return ok;
+      };
+      let best = ideal;
+      if (!feasible(ideal)) {
+        // 二分收缩：0 必然可行（保持原状），在 [0,1] 比例内找最大可行居中量
+        let lo = 0, hi = 1;
+        for (let k = 0; k < 6; k++) {
+          const mid = (lo + hi) / 2;
+          if (feasible(ideal * mid)) lo = mid; else hi = mid;
+        }
+        best = ideal * lo;
+      }
+      if (Math.abs(best) < 0.5) continue; // 移动不足 0.5cm，视为无改善
+      for (const i of idxs) boxes[i].z += best;
+      for (const i of idxs) placed[i].z = boxes[i].z;
+    }
   }
   // 全局 3D 极值点搜索：按高度分层生成候选。
   // 关键：某一层只取"竖直方向与该层相交"的箱子作为 x/z 候选来源，而不是全部箱子的面两两组合；
