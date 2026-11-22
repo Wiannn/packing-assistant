@@ -473,34 +473,19 @@ class Packer {
     this._centerLayers(placed, boxes, colCount, !this._deep);
     return { placed, unplaced: remaining };
   }
-  // 防偏载：左右(z)方向每层都居中。
-  // 前后(x)方向只在"货少"时对上层逐层居中——底层保持从最里面平铺（实际装柜先铺底），
-  // 上层跨在底层接缝上方居中，避免重量全压在一头；货多时不做，保持里面装满、门口留空。
-  // 每次平移都校验越界、碰撞、本层与上层的支撑覆盖率，不通过则二分收缩到最大可行居中量。
+  // 防偏载 + 上下对齐：
+  // 1) 先做"上下对齐"：同朝向的箱子从低层往高层挪到正下方箱子的正上方，
+  //    避免各层独立居中造成层间错位（看起来像"斜着码"）。
+  // 2) 左右(z)按规格簇整体居中：同规格货物（含旋转 90° 的）一起平移，相对位置不变，对齐不会被破坏。
+  // 3) 前后(x)仅货少时对上层居中——底层保持从最里面平铺（实际装柜先铺底）；货多时保持里面装满、门口留空。
+  // 每次平移都校验越界、碰撞、本层与上层的支撑覆盖率，不通过则二分收缩到最大可行量。
   // skip：侧墙导轨列的箱子数量——这些必须贴墙，不参与居中。
   _centerLayers(placed, boxes, skip, balanceX) {
-    const groups = new Map();
-    for (let i = skip; i < boxes.length; i++) {
-      const key = Math.round(boxes[i].y * 1000) / 1000;
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(i);
-    }
-    // 从高层往低层处理（先定上层，再挪下层）；跑两遍：
-    // 第一遍下层还没居中，上层会被下方未平移的位置限制，第二遍即可完整居中。
-    for (let pass = 0; pass < 2; pass++) for (const key of [...groups.keys()].sort((a, b) => b - a)) {
-      const idxs = groups.get(key);
-      let xmin = Infinity, xmax = -Infinity, zmin = Infinity, zmax = -Infinity;
-      for (const i of idxs) {
-        const b = boxes[i];
-        if (b.x < xmin) xmin = b.x;
-        if (b.x + b.l > xmax) xmax = b.x + b.l;
-        if (b.z < zmin) zmin = b.z;
-        if (b.z + b.w > zmax) zmax = b.z + b.w;
-      }
+    const shift = (idxs, dx, dz) => { for (const i of idxs) { boxes[i].x += dx; boxes[i].z += dz; } };
+    // 试平移：越界、与组外箱子碰撞、本组支撑、组顶箱子的支撑任一不通过即不可行（失败自动还原）
+    const tryShift = (idxs, dx, dz) => {
+      shift(idxs, dx, dz);
       const inGroup = new Set(idxs);
-      // 试平移 (dx, dz)：越界、与层外箱子碰撞、本层支撑、上层支撑任一不通过即不可行
-      const feasible = (dx, dz) => {
-        for (const i of idxs) { boxes[i].x += dx; boxes[i].z += dz; }
         let ok = true;
         for (const i of idxs) {
           const b = boxes[i];
@@ -526,39 +511,98 @@ class Packer {
           }
           if (onTop && !this._supported3D(o, boxes, o.level)) ok = false;
         }
-        for (const i of idxs) { boxes[i].x -= dx; boxes[i].z -= dz; } // 还原，由调用方决定是否落地
+        shift(idxs, -dx, -dz); // 还原，由调用方决定是否落地
         return ok;
       };
-      // 左右居中：所有层都做
-      let dz = 0;
-      const idealZ = (this.W - (zmax - zmin)) / 2 - zmin;
-      if (Math.abs(idealZ) >= 0.5) {
-        if (feasible(0, idealZ)) dz = idealZ;
-        else {
-          let lo = 0, hi = 1;
-          for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (feasible(0, idealZ * m)) lo = m; else hi = m; }
-          dz = idealZ * lo;
-        }
+      const clusterKey = b => [Math.min(b.l, b.w), Math.max(b.l, b.w), b.h].map(v => v.toFixed(3)).join('|');
+      const exactKey = b => [b.l, b.w, b.h].map(v => v.toFixed(3)).join('|');
+
+      // ---- 1) 上下对齐：同朝向的箱子从低层往高层，挪到正下方箱子的正上方 ----
+      const exactGroups = new Map();
+      for (let i = skip; i < boxes.length; i++) {
+        const k = exactKey(boxes[i]);
+        if (!exactGroups.has(k)) exactGroups.set(k, []);
+        exactGroups.get(k).push(i);
       }
-      // 前后居中：仅货少时的上层（底层保持平铺、贴最里面）
-      let dx = 0;
-      if (balanceX && key > 1e-6) {
-        const idealX = (this.L - (xmax - xmin)) / 2 - xmin;
-        if (Math.abs(idealX) >= 0.5) {
-          if (feasible(idealX, dz)) dx = idealX;
-          else {
-            let lo = 0, hi = 1;
-            for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (feasible(idealX * m, dz)) lo = m; else hi = m; }
-            dx = idealX * lo;
+      for (const g of exactGroups.values()) {
+        if (g.length < 2) continue;
+        g.sort((a, b) => boxes[a].y - boxes[b].y || boxes[a].x - boxes[b].x || boxes[a].z - boxes[b].z);
+        for (const i of g) {
+          const b = boxes[i];
+          if (b.y <= 1e-6) continue;
+          let parent = null, bestArea = 0;
+          for (const j of g) {
+            const o = boxes[j];
+            if (Math.abs(o.y + o.h - b.y) > 1e-6) continue;
+            const ox = Math.min(b.x + b.l, o.x + o.l) - Math.max(b.x, o.x);
+            const oz = Math.min(b.z + b.w, o.z + o.w) - Math.max(b.z, o.z);
+            if (ox <= 1e-6 || oz <= 1e-6) continue;
+            const area = ox * oz;
+            if (area > bestArea) { bestArea = area; parent = o; }
+          }
+          if (!parent) continue;
+          // 货多（深度优先）时前后方向也对齐，同规格上下完全对齐；
+          // 货少时前后方向留给上层的"居中"处理，只对齐左右。
+          const dx = balanceX ? 0 : parent.x - b.x;
+          const dz = parent.z - b.z;
+          if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) continue;
+          if (tryShift([i], dx, dz)) {
+            shift([i], dx, dz);
+            placed[i].x = boxes[i].x; placed[i].z = boxes[i].z;
           }
         }
       }
-      if (Math.abs(dx) < 0.5 && Math.abs(dz) < 0.5) continue; // 基本已在中间
-      for (const i of idxs) {
-        boxes[i].x += dx; boxes[i].z += dz;
-        placed[i].x = boxes[i].x; placed[i].z = boxes[i].z;
+
+      // ---- 2) 左右居中：同规格（含旋转件）整体平移，保持并排与上下对齐 ----
+      const clusters = new Map();
+      for (let i = skip; i < boxes.length; i++) {
+        const k = clusterKey(boxes[i]);
+        if (!clusters.has(k)) clusters.set(k, []);
+        clusters.get(k).push(i);
       }
-    }
+      for (const g of clusters.values()) {
+        let zmin = Infinity, zmax = -Infinity;
+        for (const i of g) { const b = boxes[i]; if (b.z < zmin) zmin = b.z; if (b.z + b.w > zmax) zmax = b.z + b.w; }
+        const idealZ = (this.W - (zmax - zmin)) / 2 - zmin;
+        if (Math.abs(idealZ) < 0.5) continue;
+        let dz;
+        if (tryShift(g, 0, idealZ)) dz = idealZ;
+        else {
+          let lo = 0, hi = 1;
+          for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (tryShift(g, 0, idealZ * m)) lo = m; else hi = m; }
+          dz = idealZ * lo;
+        }
+        if (Math.abs(dz) < 0.5) continue;
+        shift(g, 0, dz);
+        for (const i of g) placed[i].z = boxes[i].z;
+      }
+
+      // ---- 3) 前后居中：仅货少时的上层（底层保持平铺、贴最里面） ----
+      if (!balanceX) return;
+      const groups = new Map();
+      for (let i = skip; i < boxes.length; i++) {
+        const key = Math.round(boxes[i].y * 1000) / 1000;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(i);
+      }
+      for (let pass = 0; pass < 2; pass++) for (const key of [...groups.keys()].sort((a, b) => b - a)) {
+        if (key <= 1e-6) continue;
+        const g = groups.get(key);
+        let xmin = Infinity, xmax = -Infinity;
+        for (const i of g) { const b = boxes[i]; if (b.x < xmin) xmin = b.x; if (b.x + b.l > xmax) xmax = b.x + b.l; }
+        const idealX = (this.L - (xmax - xmin)) / 2 - xmin;
+        if (Math.abs(idealX) < 0.5) continue;
+        let dx;
+        if (tryShift(g, idealX, 0)) dx = idealX;
+        else {
+          let lo = 0, hi = 1;
+          for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (tryShift(g, idealX * m, 0)) lo = m; else hi = m; }
+          dx = idealX * lo;
+        }
+        if (Math.abs(dx) < 0.5) continue;
+        shift(g, dx, 0);
+        for (const i of g) placed[i].x = boxes[i].x;
+      }
   }
   // 全局 3D 极值点搜索：按高度分层生成候选。
   // 关键：某一层只取"竖直方向与该层相交"的箱子作为 x/z 候选来源，而不是全部箱子的面两两组合；
