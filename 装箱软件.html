@@ -372,6 +372,11 @@ class Packer {
   // 同上，但改成可中断的生成器：每探测一件货物就让出一次控制权，
   // 供后台精算分批驱动，避免长时间占用主线程导致"页面无响应"
   *_runPackSteps(rest, cols, assign) {
+    // 货量判断：清单总体积 ≥ 半箱 → 货多，用深度优先（从里往外装满）；
+    // 否则货少，先平铺底层再往上叠，装完前后居中
+    const totalVol = rest.reduce((s, it) => s + it.l * it.w * it.h, 0) +
+      cols.reduce((s, c) => s + c.members.reduce((t, m) => t + m.o.l * m.o.w * m.o.h, 0), 0);
+    this._deep = totalVol / (this.L * this.W * this.H) >= 0.5;
     const boxes = [];  // 已放 3D 盒子（含 x 区间）
     const placed = [];
     cols.forEach((c, ci) => {
@@ -424,32 +429,16 @@ class Packer {
     }
 
     // 防偏载：各层左右居中（导轨列保持贴墙不动）；
-    // 货少（全部装入且箱内不拥挤）时前后也居中，货多时保持里面装满、门口留空
-    const usedVol = placed.reduce((s, p) => s + p.l * p.w * p.h, 0);
-    const dense = remaining.length > 0 || usedVol / (this.L * this.W * this.H) >= 0.5;
-    this._centerLayers(placed, boxes, colCount, !dense);
+    // 货少时前后也居中，货多时保持里面装满、门口留空
+    this._centerLayers(placed, boxes, colCount, !this._deep);
     return { placed, unplaced: remaining };
   }
-  // 防偏载：宽度(z)方向逐层居中（左右永远不偏）。
-  // 长度(x)方向只在"货少"时整堆一起居中（平衡前后轴重）——整堆平移保持层间相对位置，
-  // 不会让上层脱离支撑；货多时不做，保持里面装满、门口留空。
-  // z 平移前会校验越界、碰撞、本层与上层的支撑覆盖率，不通过则二分收缩到最大可行居中量。
+  // 防偏载：左右(z)方向每层都居中。
+  // 前后(x)方向只在"货少"时对上层逐层居中——底层保持从最里面平铺（实际装柜先铺底），
+  // 上层跨在底层接缝上方居中，避免重量全压在一头；货多时不做，保持里面装满、门口留空。
+  // 每次平移都校验越界、碰撞、本层与上层的支撑覆盖率，不通过则二分收缩到最大可行居中量。
   // skip：侧墙导轨列的箱子数量——这些必须贴墙，不参与居中。
   _centerLayers(placed, boxes, skip, balanceX) {
-    // ---- 长度方向：整堆平移居中（货少时）----
-    if (balanceX) {
-      let xmin = Infinity, xmax = -Infinity;
-      for (let i = skip; i < boxes.length; i++) {
-        if (boxes[i].x < xmin) xmin = boxes[i].x;
-        if (boxes[i].x + boxes[i].l > xmax) xmax = boxes[i].x + boxes[i].l;
-      }
-      if (boxes.length > skip) {
-        const dx = (this.L - (xmax - xmin)) / 2 - xmin;
-        if (Math.abs(dx) >= 0.5 && xmin + dx >= -1e-6 && xmax + dx <= this.L + 1e-6) {
-          for (let i = skip; i < boxes.length; i++) { boxes[i].x += dx; placed[i].x = boxes[i].x; }
-        }
-      }
-    }
     const groups = new Map();
     for (let i = skip; i < boxes.length; i++) {
       const key = Math.round(boxes[i].y * 1000) / 1000;
@@ -460,20 +449,22 @@ class Packer {
     // 第一遍下层还没居中，上层会被下方未平移的位置限制，第二遍即可完整居中。
     for (let pass = 0; pass < 2; pass++) for (const key of [...groups.keys()].sort((a, b) => b - a)) {
       const idxs = groups.get(key);
-      let zmin = Infinity, zmax = -Infinity;
+      let xmin = Infinity, xmax = -Infinity, zmin = Infinity, zmax = -Infinity;
       for (const i of idxs) {
         const b = boxes[i];
+        if (b.x < xmin) xmin = b.x;
+        if (b.x + b.l > xmax) xmax = b.x + b.l;
         if (b.z < zmin) zmin = b.z;
         if (b.z + b.w > zmax) zmax = b.z + b.w;
       }
       const inGroup = new Set(idxs);
-      // 试宽度平移 dz：越界、与层外箱子碰撞、本层支撑、上层支撑任一不通过即不可行
-      const feasible = dz => {
-        for (const i of idxs) boxes[i].z += dz;
+      // 试平移 (dx, dz)：越界、与层外箱子碰撞、本层支撑、上层支撑任一不通过即不可行
+      const feasible = (dx, dz) => {
+        for (const i of idxs) { boxes[i].x += dx; boxes[i].z += dz; }
         let ok = true;
         for (const i of idxs) {
           const b = boxes[i];
-          if (b.z < -1e-6 || b.z + b.w > this.W + 1e-6) { ok = false; break; }
+          if (b.x < -1e-6 || b.x + b.l > this.L + 1e-6 || b.z < -1e-6 || b.z + b.w > this.W + 1e-6) { ok = false; break; }
           for (let j = 0; j < boxes.length; j++) {
             if (inGroup.has(j)) continue;
             const o = boxes[j];
@@ -495,23 +486,37 @@ class Packer {
           }
           if (onTop && !this._supported3D(o, boxes, o.level)) ok = false;
         }
-        for (const i of idxs) boxes[i].z -= dz; // 还原，由调用方决定是否落地
+        for (const i of idxs) { boxes[i].x -= dx; boxes[i].z -= dz; } // 还原，由调用方决定是否落地
         return ok;
       };
+      // 左右居中：所有层都做
       let dz = 0;
       const idealZ = (this.W - (zmax - zmin)) / 2 - zmin;
       if (Math.abs(idealZ) >= 0.5) {
-        if (feasible(idealZ)) dz = idealZ;
+        if (feasible(0, idealZ)) dz = idealZ;
         else {
           let lo = 0, hi = 1;
-          for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (feasible(idealZ * m)) lo = m; else hi = m; }
+          for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (feasible(0, idealZ * m)) lo = m; else hi = m; }
           dz = idealZ * lo;
         }
       }
-      if (Math.abs(dz) < 0.5) continue; // 基本已在中间
+      // 前后居中：仅货少时的上层（底层保持平铺、贴最里面）
+      let dx = 0;
+      if (balanceX && key > 1e-6) {
+        const idealX = (this.L - (xmax - xmin)) / 2 - xmin;
+        if (Math.abs(idealX) >= 0.5) {
+          if (feasible(idealX, dz)) dx = idealX;
+          else {
+            let lo = 0, hi = 1;
+            for (let k = 0; k < 6; k++) { const m = (lo + hi) / 2; if (feasible(idealX * m, dz)) lo = m; else hi = m; }
+            dx = idealX * lo;
+          }
+        }
+      }
+      if (Math.abs(dx) < 0.5 && Math.abs(dz) < 0.5) continue; // 基本已在中间
       for (const i of idxs) {
-        boxes[i].z += dz;
-        placed[i].z = boxes[i].z;
+        boxes[i].x += dx; boxes[i].z += dz;
+        placed[i].x = boxes[i].x; placed[i].z = boxes[i].z;
       }
     }
   }
@@ -571,19 +576,25 @@ class Packer {
         zs: [...zSet].filter(v => v >= -1e-6).sort((a, b) => a - b) // 同深度贴左优先
       });
     }
-    const allX = [...new Set(layers.flatMap(l => [...l.xs]))].sort((a, b) => b - a); // 深处优先
-    for (const x of allX) {
-      for (const lyr of layers) { // 同一深度先低层后高层
-        if (!lyr.xs.has(x)) continue;
-        for (const z of lyr.zs) {
-          for (const o of orients) {
-            if (x + o.l > L + 1e-6 || lyr.y + o.h > H + 1e-6 || z + o.w > W + 1e-6) continue;
-            this._evals++;
-            const b = { x, y: lyr.y, z, l: o.l, w: o.w, h: o.h };
-            if (this._collide3D(b, boxes)) continue;
-            if (!this._supported3D(b, boxes, level)) continue;
-            return { o, p: b }; // 最深处第一个合法位即最优
-          }
+    // 试位次序按货量自适应：
+    // 货多 → 最深处优先、同深度低层优先（从里面堆满再往门口，空余留在靠门处）；
+    // 货少 → 低层优先、同层内深处优先（先平铺地面，再往上叠，重心更稳也更好看）
+    const order = [];
+    if (this._deep) {
+      const allX = [...new Set(layers.flatMap(l => [...l.xs]))].sort((a, b) => b - a); // 深处优先
+      for (const x of allX) for (const lyr of layers) if (lyr.xs.has(x)) order.push([lyr, x]);
+    } else {
+      for (const lyr of layers) for (const x of [...lyr.xs].sort((a, b) => b - a)) order.push([lyr, x]);
+    }
+    for (const [lyr, x] of order) {
+      for (const z of lyr.zs) {
+        for (const o of orients) {
+          if (x + o.l > L + 1e-6 || lyr.y + o.h > H + 1e-6 || z + o.w > W + 1e-6) continue;
+          this._evals++;
+          const b = { x, y: lyr.y, z, l: o.l, w: o.w, h: o.h };
+          if (this._collide3D(b, boxes)) continue;
+          if (!this._supported3D(b, boxes, level)) continue;
+          return { o, p: b }; // 按上述次序第一个合法位即最优
         }
       }
     }
