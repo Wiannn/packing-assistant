@@ -1487,10 +1487,20 @@ class Packer {
   async function ocrEnsureWorker() {
     if (ocrWorker) return ocrWorker;
     await ocrLoadEngine();
-    ocrStatus('正在加载中文识别模型（首次需联网下载，约 10-30 秒）…');
-    ocrWorker = await Tesseract.createWorker('chi_sim+eng', 1, {
-      logger: m => { if (m.status) ocrStatus('识别引擎：' + m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : '')); }
+    ocrStatus('正在加载中文识别模型（约 1.7MB，首次需联网）…');
+    const make = Tesseract.createWorker('chi_sim', 1, {
+      // 用 jsDelivr 上的小型中文模型（1.7MB）：默认源的 20MB 大模型国内下载经常卡住
+      langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/chi_sim@1.0.0/4.0.0_best_int',
+      logger: m => { if (m.status) ocrStatus('识别引擎：' + m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : '')); },
+      errorHandler: e => ocrStatus('识别引擎错误：' + ((e && e.message) || e)),
     });
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('模型下载超时（超过 2 分钟），请检查网络后重试')), 120000));
+    try {
+      ocrWorker = await Promise.race([make, timeout]);
+    } catch (e) {
+      ocrWorker = null;
+      throw e;
+    }
     return ocrWorker;
   }
   // 放大 + 灰度 + Otsu 二值化 + 去掉表格长横线/竖线，提升截图表格的识别率
