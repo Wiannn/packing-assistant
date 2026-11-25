@@ -138,6 +138,7 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
 导轨  导轨  600  20  15  40
 木箱  木箱  270  40  42  12
 纸箱  纸箱  60  40  30  200
+托盘  托盘  120  100  15  20
 轮胎  纸箱  80  45  30  4  #00b42a  是  是
 （后 3 列可省略；勾圆柱时「宽」列填内径，留空为实心）"></textarea>
         <div class="row btns">
@@ -153,7 +154,7 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
     <section class="block">
       <h2>堆叠规则（承重等级）</h2>
       <div class="row" id="levelRules"></div>
-      <p class="hint">规则：货物 A 能叠在货物 B 上 ⟺ B 的承重等级 ≥ A 的等级；地面可放任何货物。<br>默认：纸箱=1，木箱=2，导轨=3 → 纸箱可叠所有；木箱可叠木箱/导轨；导轨只能落地或叠导轨。</p>
+      <p class="hint">规则：货物 A 能叠在货物 B 上 ⟺ B 的承重等级 ≥ A 的等级；地面可放任何货物。<br>默认：纸箱=1，木箱=2，托盘=2，导轨=3 → 纸箱可叠所有；木箱/托盘可互相叠，也可叠导轨；导轨只能落地或叠导轨。</p>
     </section>
     <section class="block">
       <h2>模式</h2>
@@ -751,7 +752,7 @@ class Packer {
     container: { L: 589, W: 235, H: 239 },
     cargoDef: [], placed: [], mode: 'auto', selected: null, stepIndex: 0, nextId: 1,
     // 承重等级：A 能叠在 B 上 ⟺ level(B) >= level(A)；地面可放任何货物
-    catLevel: { '纸箱': 1, '木箱': 2, '导轨': 3 },
+    catLevel: { '纸箱': 1, '木箱': 2, '托盘': 2, '导轨': 3 },
   };
   // 货物/类别的承重等级；未识别类别默认 1（最轻）
   function levelOfCat(cat) { return state.catLevel[cat] ?? 1; }
@@ -1266,12 +1267,11 @@ class Packer {
       if (!isNaN(n) && n > maxNo) maxNo = n;
     });
     const name = def.name || String(maxNo + 1);
-    // 旧数据里的「托盘」类别统一归为「木箱」
-    const cat = (def.category === '托盘') ? '木箱' : (def.category || '纸箱');
-    // 类别默认颜色：纸箱=橙色；木箱=浅木色 rgb(238,219,185)；导轨=蓝色 rgb(0,85,255)
-    const catDefaultColor = { '纸箱': '#ff7d00', '木箱': '#EEDBB9', '导轨': '#0055FF' };
+    const cat = def.category || '纸箱';
+    // 类别默认颜色：纸箱=橙色；木箱=浅木色；托盘=棕色；导轨=蓝色
+    const catDefaultColor = { '纸箱': '#ff7d00', '木箱': '#EEDBB9', '托盘': '#8B5A2B', '导轨': '#0055FF' };
     const c = def.color || catDefaultColor[cat] || colors[Math.floor(Math.random() * colors.length)];
-    const catOpts = ['纸箱', '木箱', '导轨'].map(o => `<option value="${o}" ${o === cat ? 'selected' : ''}>${o}</option>`).join('');
+    const catOpts = ['纸箱', '木箱', '托盘', '导轨'].map(o => `<option value="${o}" ${o === cat ? 'selected' : ''}>${o}</option>`).join('');
     const mustChk = def.mustLoad ? 'checked' : '';
     // 圆柱回填：宽列显示内径（没有内径则留空，表示实心）
     const wInit = def.isCylinder ? (def.innerD || '') : (def.w || '');
@@ -1296,11 +1296,12 @@ class Packer {
     };
     cylCb.addEventListener('change', () => { if (cylCb.checked) colorIn.value = '#00b42a'; syncCylHint(); });
     syncCylHint();
-    // 切换类别时应用对应默认颜色（纸箱=橙色，木箱=浅木色，导轨=蓝色）
+    // 切换类别时应用对应默认颜色（纸箱=橙色，木箱=浅木色，托盘=棕色，导轨=蓝色）
     const catSel = tr.querySelector('select');
     catSel.addEventListener('change', () => {
       if (catSel.value === '纸箱') colorIn.value = '#ff7d00';
       else if (catSel.value === '木箱') colorIn.value = '#EEDBB9';
+      else if (catSel.value === '托盘') colorIn.value = '#8B5A2B';
       else if (catSel.value === '导轨') colorIn.value = '#0055FF';
     });
     $('cargoBody').appendChild(tr);
@@ -1334,11 +1335,12 @@ class Packer {
       const errs = [], warns = [];
       const row = { line: idx + 1, name: nameRaw || '', category: '纸箱', l: 0, w: 0, h: 0, innerD: 0, qty: 1, color: '', mustLoad: false, isCylinder: false, errs, warns };
       if (!nameRaw) { errs.push('缺少名称'); row.name = '货物' + (rows.length + 1); }
-      // 类别：纸箱 / 木箱 / 导轨
+      // 类别：纸箱 / 木箱 / 托盘 / 导轨
       const cr = catRaw || '';
       if (!cr) row.category = '纸箱';
       else if (/导轨|guide|rail/i.test(cr)) row.category = '导轨';
-      else if (/木|wood|托盘|pallet/i.test(cr)) row.category = '木箱';
+      else if (/托盘|pallet/i.test(cr)) row.category = '托盘';
+      else if (/木|wood/i.test(cr)) row.category = '木箱';
       else if (/纸|carton|box|card/i.test(cr)) row.category = '纸箱';
       else { warns.push('类别「' + cr + '」未识别，按纸箱处理'); row.category = '纸箱'; }
       const num = v => { const n = parseFloat(String(v).replace(/[^\d.\-]/g, '')); return isFinite(n) ? n : NaN; };
