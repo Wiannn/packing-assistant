@@ -351,13 +351,13 @@ class Packer {
       for (let i = 0; i < (it.qty || 1); i++) flat.push({ ...it, instanceId: it.id + '-' + i });
     }
 
-    // ---- 阶段1：必装长条物（长 > 箱宽→无法横放，且长宽比 ≥ 3）分配到左右侧墙列 ----
-    // 按"形状"判定而非箱长比例，保证同一批导轨在 20GP / 40HC 等任何箱型下都走贴墙纵码
+    // ---- 阶段1：长条物（长 > 箱宽→无法横放，且长宽比 ≥ 3）分配到左右侧墙列 ----
+    // 按"形状"判定而非"必装"标记，保证同一批导轨无论是否勾必装、在 20GP / 40HC 等任何箱型下都走贴墙纵码
     // 这里只定每列的 z/y；列的 x（沿箱长方向位置）稍后枚举，由其余货物的顶托需求决定
     const longs = [], rest = [];
     for (const it of flat) {
       const o = it.l >= it.w ? { l: it.l, w: it.w, h: it.h } : { l: it.w, w: it.l, h: it.h };
-      const isBar = it.mustLoad && o.l > this.W + 1e-6 && o.l >= 3 * o.w && o.l <= this.L + 1e-6;
+      const isBar = o.l > this.W + 1e-6 && o.l >= 3 * o.w && o.l <= this.L + 1e-6;
       if (isBar) longs.push({ it, o });
       else rest.push(it);
     }
@@ -457,7 +457,7 @@ class Packer {
         boxes.push({ x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, level: c.level });
         placed.push({
           instanceId: m.it.instanceId, baseId: m.it.id, name: m.it.name, category: m.it.category, color: m.it.color,
-          x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, isCylinder: m.it.isCylinder === true, innerD: m.it.innerD || 0, mustLoad: true,
+          x, y: m.y, z: c.z, l: m.o.l, w: m.o.w, h: m.o.h, isCylinder: m.it.isCylinder === true, innerD: m.it.innerD || 0, mustLoad: !!m.it.mustLoad,
         });
       }
     });
