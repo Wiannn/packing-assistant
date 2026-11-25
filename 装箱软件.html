@@ -185,6 +185,7 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
       <h2>方案</h2>
       <div class="row btns">
         <button id="exportPlan" class="btn">导出方案</button>
+        <button id="photoPlan" class="btn">导出照片</button>
         <button id="importPlanBtn" class="btn">导入方案</button>
         <input type="file" id="importPlan" accept="application/json" hidden>
       </div>
@@ -775,7 +776,7 @@ class Packer {
   const canvas = document.getElementById('three-canvas');
   let renderer = null;
   try {
-    renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(window.devicePixelRatio);
   } catch (e) {
     console.warn('WebGL 不可用，3D 渲染关闭，其它逻辑仍可用：', e.message);
@@ -1854,6 +1855,88 @@ class Packer {
     const a = document.createElement('a'); a.href = url; a.download = '装箱方案.json'; a.click();
     URL.revokeObjectURL(url);
   };
+  // 导出照片：按「立体」视角高清渲染柜内画面，并在上下加标题/颜色图例，
+  // 一张 PNG 就能看出货怎么码放，直接发给叉车工。
+  function exportPhoto() {
+    if (!renderer) { alert('当前浏览器不支持 WebGL，无法导出照片'); return; }
+    if (!state.placed.length) { alert('还没有装箱结果，请先点「自动装箱」'); return; }
+    const { L, W, H } = state.container;
+    const aspect = Math.max(0.6, (viewEl.clientWidth || 1) / (viewEl.clientHeight || 1));
+    const imgW = 1600, imgH = Math.round(imgW / aspect);
+    // 临时清场：隐藏网格与箱外未装货物；分步展示时被隐藏的货物全部显示出来
+    const backup = [];
+    const setVis = (o, v) => { if (o) { backup.push([o, o.visible]); o.visible = v; } };
+    setVis(grid, false);
+    for (const m of unplacedMeshes.values()) setVis(m, false);
+    for (const m of meshByInst.values()) setVis(m, true);
+    // 与点击「立体」完全一致的机位
+    const cam = new THREE.PerspectiveCamera(50, imgW / imgH, 1, 1_000_000);
+    const d = Math.max(L, W, H) * 1.6;
+    cam.position.set(L * 0.9, H * 1.8, W * 1.5 + d * 0.4);
+    cam.lookAt(L / 2, H / 2, W / 2);
+    const dpr = renderer.getPixelRatio();
+    let shot = '';
+    try {
+      renderer.setPixelRatio(1);
+      renderer.setSize(imgW, imgH, false);
+      renderer.render(scene, cam);
+      shot = renderer.domElement.toDataURL('image/png');
+    } finally {
+      renderer.setPixelRatio(dpr);
+      resize(); // 恢复画布尺寸与相机
+      for (const [o, v] of backup) o.visible = v;
+    }
+    // 合成：标题 + 三维图 + 颜色图例
+    const pad = 28, titleH = 68, rowH = 32, perRow = 4;
+    const agg = new Map();
+    for (const p of state.placed) {
+      const k = (p.name || '货物') + '|' + (p.color || '#888888');
+      if (!agg.has(k)) agg.set(k, { name: p.name || '货物', color: p.color || '#888888', qty: 0 });
+      agg.get(k).qty++;
+    }
+    const legend = [...agg.values()].sort((a, b) => b.qty - a.qty).slice(0, 16);
+    const legendRows = Math.max(1, Math.ceil(legend.length / perRow));
+    const footH = pad + legendRows * rowH + 26;
+    const out = document.createElement('canvas');
+    out.width = imgW; out.height = titleH + imgH + footH;
+    const g = out.getContext('2d');
+    const font = '"Microsoft YaHei", "PingFang SC", sans-serif';
+    const un = (state.unplaced || []).length;
+    g.fillStyle = '#fff'; g.fillRect(0, 0, out.width, out.height);
+    g.textBaseline = 'middle';
+    g.fillStyle = '#1f2329'; g.font = `bold 26px ${font}`;
+    g.fillText('装箱示意图', pad, titleH / 2);
+    g.fillStyle = '#4e5969'; g.font = `15px ${font}`; g.textAlign = 'right';
+    g.fillText(`柜内 ${L}×${W}×${H} cm　装入 ${state.placed.length} 件${un ? `　未装 ${un} 件` : ''}`, imgW - pad, titleH / 2);
+    g.textAlign = 'left';
+    const img = new Image();
+    img.onload = () => {
+      g.drawImage(img, 0, titleH, imgW, imgH);
+      const colW = (imgW - pad * 2) / perRow;
+      const y0 = titleH + imgH + pad + rowH / 2;
+      g.font = `15px ${font}`;
+      legend.forEach((it, i) => {
+        const x = pad + (i % perRow) * colW;
+        const yy = y0 + Math.floor(i / perRow) * rowH;
+        g.fillStyle = it.color; g.fillRect(x, yy - 9, 18, 18);
+        g.strokeStyle = '#c9cdd4'; g.lineWidth = 1; g.strokeRect(x + 0.5, yy - 8.5, 17, 17);
+        g.fillStyle = '#1f2329';
+        g.fillText(`${it.name}　×${it.qty}`, x + 26, yy);
+      });
+      g.fillStyle = '#86909c'; g.font = `13px ${font}`; g.textAlign = 'right';
+      g.fillText('视角：立体（橙色端面为门口）', imgW - pad, out.height - 14);
+      out.toBlob(b => {
+        if (!b) return;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b);
+        a.download = '装箱照片.png';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }, 'image/png');
+    };
+    img.src = shot;
+  }
+  $('photoPlan').onclick = exportPhoto;
   $('importPlanBtn').onclick = () => $('importPlan').click();
   $('importPlan').onchange = e => {
     const f = e.target.files[0]; if (!f) return;
