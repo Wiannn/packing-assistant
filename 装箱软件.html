@@ -1695,8 +1695,9 @@ class Packer {
   function writeAllLists(store) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(store)); } catch (e) { console.warn('保存清单失败', e); }
   }
-  // 最近使用/保存的排在前面；下拉框只展示最近 8 套，其余收进「管理全部清单」
-  const RECENT_LIST_N = 8;
+  // 最近使用/保存的排在前面；「默认清单」固定置顶；下拉框最多展示 6 套，其余收进「管理全部清单」
+  const RECENT_LIST_N = 6;
+  const PINNED_LIST_NAME = '默认清单';
   function listLastUsed(l) { return (l && (l.usedAt || l.savedAt)) || 0; }
   function sortedListNames(store) {
     return Object.keys(store.lists).sort((a, b) =>
@@ -1720,9 +1721,14 @@ class Packer {
     store = store || readAllLists();
     const sel = $('listSelect');
     const names = sortedListNames(store);
-    let recent = names.slice(0, RECENT_LIST_N);
+    // 「默认清单」固定在最上面，不参与最近使用的轮换
+    const pinned = names.includes(PINNED_LIST_NAME) ? [PINNED_LIST_NAME] : [];
+    let recent = pinned.concat(names.filter(n => n !== PINNED_LIST_NAME).slice(0, RECENT_LIST_N - pinned.length));
     // 当前清单必须出现在下拉框里，否则选中项会变成别的清单
-    if (store.lists[activeListName] && !recent.includes(activeListName)) recent = [activeListName, ...recent].slice(0, RECENT_LIST_N);
+    if (store.lists[activeListName] && !recent.includes(activeListName)) {
+      recent = recent.slice(0, RECENT_LIST_N - 1);
+      recent.splice(pinned.length, 0, activeListName);
+    }
     let html = recent.map(n => `<option value="${escHtml(n)}" ${n === activeListName ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
     if (names.length > recent.length) html += `<option value="__manage__">⋯ 管理全部清单（共 ${names.length} 套）</option>`;
     else if (!names.length) html += `<option value="__manage__">⋯ 管理全部清单</option>`;
