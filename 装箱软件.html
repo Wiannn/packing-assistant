@@ -74,6 +74,23 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
 #bulkPreviewBox tr.err td { background: #ffece8; color: #cb2634; }
 #bulkPreviewBox tr.warn td { background: #fff7e8; }
 #bulkResult { margin-top: 4px; }
+/* 清单管理弹层 */
+#listModal { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; }
+#listModal.show { display: flex; }
+#listModal .modal-box { width: 520px; max-width: 92vw; max-height: 78vh; background: #fff; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.2); display: flex; flex-direction: column; overflow: hidden; }
+#listModal .modal-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e5e6eb; font-size: 14px; font-weight: 600; }
+#listModal .modal-head .modal-sub { font-size: 12px; font-weight: 400; color: #86909c; }
+#listModal .modal-close { margin-left: auto; border: none; background: transparent; font-size: 20px; line-height: 1; color: #86909c; cursor: pointer; padding: 0 2px; }
+#listModal .modal-close:hover { color: #1d2129; }
+#listModal .modal-search { margin: 10px 14px 6px; padding: 5px 8px; border: 1px solid #d9dce0; border-radius: 4px; font-size: 13px; }
+#listModalBody { overflow-y: auto; padding: 0 14px 12px; }
+.list-row { display: flex; align-items: center; gap: 8px; padding: 7px 6px; border-bottom: 1px solid #f2f3f5; font-size: 12px; }
+.list-row:hover { background: #f7f8fa; }
+.list-row .lr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: #1d2129; }
+.list-row .lr-name .lr-badge { margin-left: 6px; font-size: 10px; color: #165dff; border: 1px solid #bedaff; background: #f2f7ff; border-radius: 3px; padding: 0 4px; }
+.list-row .lr-meta { color: #86909c; font-size: 11px; white-space: nowrap; }
+.list-row .btn { padding: 2px 8px; font-size: 11px; }
+.list-empty { padding: 18px 4px; text-align: center; color: #86909c; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -208,6 +225,19 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
     </div>
     <canvas id="three-canvas"></canvas>
   </main>
+</div>
+
+<!-- 清单管理弹层：搜索 + 载入 + 删除，老清单不删也只在需要时才出现 -->
+<div id="listModal">
+  <div class="modal-box">
+    <div class="modal-head">
+      清单管理
+      <span class="modal-sub" id="listModalCount"></span>
+      <button class="modal-close" id="listModalClose" title="关闭">×</button>
+    </div>
+    <input type="text" id="listSearch" class="modal-search" placeholder="按名称搜索清单…">
+    <div id="listModalBody"></div>
+  </div>
 </div>
 
 <!-- three.js UMD 版本（CDN，file:// 下可跨域加载 script） -->
@@ -1466,10 +1496,18 @@ class Packer {
   function writeAllLists(store) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(store)); } catch (e) { console.warn('保存清单失败', e); }
   }
+  // 最近使用/保存的排在前面；下拉框只展示最近 8 套，其余收进「管理全部清单」
+  const RECENT_LIST_N = 8;
+  function listLastUsed(l) { return (l && (l.usedAt || l.savedAt)) || 0; }
+  function sortedListNames(store) {
+    return Object.keys(store.lists).sort((a, b) =>
+      listLastUsed(store.lists[b]) - listLastUsed(store.lists[a]) || a.localeCompare(b, 'zh-CN'));
+  }
   function saveCargoState() {
     const store = readAllLists();
+    const now = Date.now();
     store.active = activeListName;
-    store.lists[activeListName] = { container: state.container, cargoDef: readCargoRows(), catLevel: state.catLevel, savedAt: Date.now() };
+    store.lists[activeListName] = { container: state.container, cargoDef: readCargoRows(), catLevel: state.catLevel, savedAt: now, usedAt: now };
     writeAllLists(store);
     renderListSelect(store);
   }
@@ -1482,7 +1520,14 @@ class Packer {
   function renderListSelect(store) {
     store = store || readAllLists();
     const sel = $('listSelect');
-    sel.innerHTML = Object.keys(store.lists).map(n => `<option value="${n}" ${n === activeListName ? 'selected' : ''}>${n}</option>`).join('');
+    const names = sortedListNames(store);
+    let recent = names.slice(0, RECENT_LIST_N);
+    // 当前清单必须出现在下拉框里，否则选中项会变成别的清单
+    if (store.lists[activeListName] && !recent.includes(activeListName)) recent = [activeListName, ...recent].slice(0, RECENT_LIST_N);
+    let html = recent.map(n => `<option value="${escHtml(n)}" ${n === activeListName ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
+    if (names.length > recent.length) html += `<option value="__manage__">⋯ 管理全部清单（共 ${names.length} 套）</option>`;
+    else if (!names.length) html += `<option value="__manage__">⋯ 管理全部清单</option>`;
+    sel.innerHTML = html;
   }
   // 把某套清单数据加载到界面（表格 + 集装箱 + 等级）
   function applyListData(data) {
@@ -1512,19 +1557,25 @@ class Packer {
 
   // 清单切换 / 另存为 / 删除
   $('listSelect').onchange = () => {
+    const sel = $('listSelect');
+    if (sel.value === '__manage__') { sel.value = activeListName; openListModal(); return; }
     const store = readAllLists();
-    const name = $('listSelect').value;
+    const name = sel.value;
     if (!store.lists[name]) return;
     activeListName = name;
-    store.active = name; writeAllLists(store);
+    store.active = name;
+    store.lists[name].usedAt = Date.now();
+    writeAllLists(store);
     applyListData(store.lists[name]);
+    renderListSelect(store);
   };
   $('listSaveAs').onclick = () => {
     const name = prompt('新清单名称：', activeListName + ' 副本');
     if (!name || !name.trim()) return;
     const n = name.trim();
     const store = readAllLists();
-    store.lists[n] = { container: state.container, cargoDef: readCargoRows(), catLevel: { ...state.catLevel }, savedAt: Date.now() };
+    const now = Date.now();
+    store.lists[n] = { container: state.container, cargoDef: readCargoRows(), catLevel: { ...state.catLevel }, savedAt: now, usedAt: now };
     store.active = n; activeListName = n;
     writeAllLists(store); renderListSelect(store);
   };
@@ -1536,11 +1587,85 @@ class Packer {
     const names = Object.keys(store.lists);
     activeListName = names[0] || '默认清单';
     store.active = activeListName;
-    if (names.length === 0) store.lists[activeListName] = { container: state.container, cargoDef: [], catLevel: state.catLevel, savedAt: Date.now() };
+    if (names.length === 0) store.lists[activeListName] = { container: state.container, cargoDef: [], catLevel: state.catLevel, savedAt: Date.now(), usedAt: Date.now() };
     writeAllLists(store);
     applyListData(store.lists[activeListName]);
     renderListSelect(store);
   };
+
+  // ---- 清单管理弹层（搜索 / 载入 / 删除；老清单保留但不再占下拉框）----
+  function listMeta(l) {
+    const rows = (l && l.cargoDef) || [];
+    const qty = rows.reduce((s, d) => s + Math.max(0, +d.qty || 0), 0);
+    return `${rows.length} 行 / ${qty} 件`;
+  }
+  function fmtListTime(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function renderListModal(keyword) {
+    const store = readAllLists();
+    const names = sortedListNames(store);
+    const kw = (keyword || '').trim().toLowerCase();
+    const hit = kw ? names.filter(n => n.toLowerCase().includes(kw)) : names;
+    $('listModalCount').textContent = `共 ${names.length} 套`;
+    if (!hit.length) {
+      $('listModalBody').innerHTML = `<div class="list-empty">${names.length ? '没有匹配的清单' : '还没有保存的清单'}</div>`;
+      return;
+    }
+    $('listModalBody').innerHTML = hit.map(n => {
+      const l = store.lists[n];
+      return `<div class="list-row" data-name="${escHtml(n)}">
+        <span class="lr-name" title="${escHtml(n)}">${escHtml(n)}${n === activeListName ? '<span class="lr-badge">当前</span>' : ''}</span>
+        <span class="lr-meta">${listMeta(l)}</span>
+        <span class="lr-meta">${fmtListTime(listLastUsed(l))}</span>
+        <button class="btn" data-act="load">载入</button>
+        <button class="btn" data-act="del">删除</button>
+      </div>`;
+    }).join('');
+  }
+  function openListModal() {
+    $('listSearch').value = '';
+    renderListModal('');
+    $('listModal').classList.add('show');
+    $('listSearch').focus();
+  }
+  function closeListModal() { $('listModal').classList.remove('show'); }
+  $('listModalClose').onclick = closeListModal;
+  $('listModal').addEventListener('click', e => { if (e.target === $('listModal')) closeListModal(); });
+  $('listSearch').addEventListener('input', () => renderListModal($('listSearch').value));
+  $('listModalBody').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const row = btn.closest('.list-row');
+    const name = row && row.dataset.name;
+    if (!name) return;
+    const store = readAllLists();
+    if (!store.lists[name]) return;
+    if (btn.dataset.act === 'load') {
+      activeListName = name;
+      store.active = name;
+      store.lists[name].usedAt = Date.now();
+      writeAllLists(store);
+      closeListModal();
+      applyListData(store.lists[name]);
+      renderListSelect(store);
+    } else if (btn.dataset.act === 'del') {
+      if (!confirm(`删除清单「${name}」？此操作不可恢复`)) return;
+      delete store.lists[name];
+      if (name === activeListName) {
+        const rest = sortedListNames(store);
+        activeListName = rest[0] || '默认清单';
+        store.active = activeListName;
+        if (!store.lists[activeListName]) store.lists[activeListName] = { container: state.container, cargoDef: [], catLevel: state.catLevel, savedAt: Date.now(), usedAt: Date.now() };
+        applyListData(store.lists[activeListName]);
+      }
+      writeAllLists(store);
+      renderListModal($('listSearch').value);
+      renderListSelect(store);
+    }
+  });
 
   // 启动时：优先从 localStorage 读取上次保存的清单；否则用默认示例
   const saved = loadCargoState();
