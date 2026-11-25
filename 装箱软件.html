@@ -895,6 +895,7 @@ class Packer {
     return sp;
   }
   function buildContainer() {
+    cancelBgPack(); // 箱型变了，基于旧尺寸的后台精算结果必须作废，否则会把 40HC 的布局套到 20GP 上
     if (grid) scene.remove(grid);
     if (containerMesh) scene.remove(containerMesh);
     const { L, W, H } = state.container;
@@ -1681,6 +1682,7 @@ class Packer {
     if (saved.container) {
       state.container = saved.container;
       $('cW').value = saved.container.L; $('cD').value = saved.container.W; $('cH').value = saved.container.H;
+      buildContainer(); // 恢复上次清单的箱型后必须重建 3D 箱体，否则画面还是启动默认箱型、装箱却用清单里的尺寸
     }
     saved.cargoDef.forEach(d => addCargoRow(d));
   } else {
