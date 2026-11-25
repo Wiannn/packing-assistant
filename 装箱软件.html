@@ -471,6 +471,32 @@ class Packer {
     // 防偏载：各层左右居中（导轨列保持贴墙不动）；
     // 货少时前后也居中，货多时保持里面装满、门口留空
     this._centerLayers(placed, boxes, colCount, !this._deep);
+    // 对齐/居中后门口上层可能腾出整齐空位（错位件被挪正后），再补装一轮。
+    // 与主循环共用同一个时间预算，不再额外加时，避免"先出结果"被拖慢。
+    if (remaining.length) {
+      let progress = true;
+      while (progress) {
+        progress = false;
+        for (let i = 0; i < remaining.length; i++) {
+          yield;
+          const it = remaining[i];
+          const lv2 = this.levelOf(it);
+          const hit = this._findFillPos(it, boxes, lv2);
+          if (!hit) continue;
+          const { o, p } = hit;
+          boxes.push({ x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h, level: lv2 });
+          placed.push({
+            instanceId: it.instanceId, baseId: it.id, name: it.name, category: it.category, color: it.color,
+            x: p.x, y: p.y, z: p.z, l: o.l, w: o.w, h: o.h,
+            isCylinder: it.isCylinder === true, innerD: it.innerD || 0, mustLoad: !!it.mustLoad,
+          });
+          remaining.splice(i, 1);
+          i--;
+          progress = true;
+        }
+      }
+      if (placed.length) this._centerLayers(placed, boxes, colCount, !this._deep);
+    }
     return { placed, unplaced: remaining };
   }
   // 防偏载 + 上下对齐：
@@ -524,31 +550,46 @@ class Packer {
         if (!exactGroups.has(k)) exactGroups.set(k, []);
         exactGroups.get(k).push(i);
       }
+      const xzOverlap = (a, b) =>
+        Math.min(a.x + a.l, b.x + b.l) - Math.max(a.x, b.x) > 1e-6 &&
+        Math.min(a.z + a.w, b.z + b.w) - Math.max(a.z, b.z) > 1e-6;
       for (const g of exactGroups.values()) {
         if (g.length < 2) continue;
         g.sort((a, b) => boxes[a].y - boxes[b].y || boxes[a].x - boxes[b].x || boxes[a].z - boxes[b].z);
+        // 把 i 及其上方所有同规格、竖直相接的后代作为一个整体移动，避免上层失撑导致对齐失败
+        const stackOf = i => {
+          const out = [i], seen = new Set([i]);
+          for (let k = 0; k < out.length; k++) {
+            const bk = boxes[out[k]];
+            for (const j of g) {
+              if (seen.has(j)) continue;
+              const bj = boxes[j];
+              if (Math.abs(bj.y - (bk.y + bk.h)) > 1e-6 || !xzOverlap(bj, bk)) continue;
+              seen.add(j); out.push(j);
+            }
+          }
+          return out;
+        };
         for (const i of g) {
           const b = boxes[i];
           if (b.y <= 1e-6) continue;
-          let parent = null, bestArea = 0;
-          for (const j of g) {
-            const o = boxes[j];
-            if (Math.abs(o.y + o.h - b.y) > 1e-6) continue;
-            const ox = Math.min(b.x + b.l, o.x + o.l) - Math.max(b.x, o.x);
-            const oz = Math.min(b.z + b.w, o.z + o.w) - Math.max(b.z, o.z);
-            if (ox <= 1e-6 || oz <= 1e-6) continue;
-            const area = ox * oz;
-            if (area > bestArea) { bestArea = area; parent = o; }
-          }
-          if (!parent) continue;
+          const below = g.filter(j => Math.abs(boxes[j].y + boxes[j].h - b.y) < 1e-6 && xzOverlap(boxes[j], b));
+          if (!below.length) continue;
+          // 按 x 排序后与下方同规格件"按序号"一对一匹配：第 k 件对下方第 k 件，
+          // 这样门口那几层会整列挪到底层对应的位置上，而不是各自找最近位置挤成错位。
+          const sameLevel = g.filter(j => Math.abs(boxes[j].y - b.y) < 1e-6)
+            .sort((p, q) => boxes[p].x - boxes[q].x || boxes[p].z - boxes[q].z);
+          const idx = Math.max(sameLevel.indexOf(i), 0);
+          below.sort((p, q) => boxes[p].x - boxes[q].x || boxes[p].z - boxes[q].z);
+          const parent = boxes[below[Math.min(idx, below.length - 1)]];
           // 货多（深度优先）时前后方向也对齐，同规格上下完全对齐；
           // 货少时前后方向留给上层的"居中"处理，只对齐左右。
           const dx = balanceX ? 0 : parent.x - b.x;
           const dz = parent.z - b.z;
           if (Math.abs(dx) < 1e-6 && Math.abs(dz) < 1e-6) continue;
-          if (tryShift([i], dx, dz)) {
-            shift([i], dx, dz);
-            placed[i].x = boxes[i].x; placed[i].z = boxes[i].z;
+          const st = stackOf(i);
+          if (tryShift(st, dx, dz)) {
+            for (const k of st) { placed[k].x = boxes[k].x; placed[k].z = boxes[k].z; }
           }
         }
       }
@@ -628,14 +669,28 @@ class Packer {
         zSet.add(W - o.w); // 贴右墙
       }
       for (const u of boxes) {
-        if (u.y >= y + h - 1e-6 || u.y + u.h <= y + 1e-6) continue; // 竖直方向不相交的箱子与本层无关
-        xSet.add(u.x); xSet.add(u.x + u.l);
-        zSet.add(u.z); zSet.add(u.z + u.w);
-        for (const o of orients) {
-          xSet.add(u.x - o.l);          // 货物右端面贴着 u 的左端面（向门口方向紧靠）
-          xSet.add(u.x + u.l - o.l);    // 货物右端面与 u 的右端面齐平（如导轨顶从深处端起排）
-          zSet.add(u.z - o.w);
-          zSet.add(u.z + u.w - o.w);
+        const intersects = u.y < y + h - 1e-6 && u.y + u.h > y + 1e-6;
+        // "顶面正好托住本层底"的箱子也要参与：否则正上方那个位置不进入候选，
+        // 上层只能贴着别的箱子面错位落位（门口层层偏移、每层少装一件）。
+        const supports = Math.abs(u.y + u.h - y) < 1e-6;
+        if (!intersects && !supports) continue;
+        if (intersects) {
+          xSet.add(u.x); xSet.add(u.x + u.l);
+          zSet.add(u.z); zSet.add(u.z + u.w);
+          for (const o of orients) {
+            xSet.add(u.x - o.l);          // 货物右端面贴着 u 的左端面（向门口方向紧靠）
+            xSet.add(u.x + u.l - o.l);    // 货物右端面与 u 的右端面齐平（如导轨顶从深处端起排）
+            zSet.add(u.z - o.w);
+            zSet.add(u.z + u.w - o.w);
+          }
+        } else {
+          // 仅支撑件：只有与本货物底面积一致时才补"正上方"位置，
+          // 保证同规格货物上下对齐，同时不改变混装货物的试位次序。
+          for (const o of orients) {
+            if (Math.abs(u.l - o.l) > 1e-6 || Math.abs(u.w - o.w) > 1e-6) continue;
+            xSet.add(u.x); xSet.add(u.x + u.l - o.l);
+            zSet.add(u.z); zSet.add(u.z + u.w - o.w);
+          }
         }
       }
       if (y > 1e-6) {
@@ -675,6 +730,8 @@ class Packer {
         for (const o of orients) {
           if (x + o.l > L + 1e-6 || lyr.y + o.h > H + 1e-6 || z + o.w > W + 1e-6) continue;
           this._evals++;
+          // 候选位变多后单次探测可能很长：每 1024 次评估校准一次耗时，保证"快速出结果"不超预算太多
+          if ((this._evals & 1023) === 0 && Date.now() - this._t0 > this.maxPackMs) return null;
           const b = { x, y: lyr.y, z, l: o.l, w: o.w, h: o.h };
           if (this._collide3D(b, boxes)) continue;
           if (!this._supported3D(b, boxes, level)) continue;
