@@ -171,7 +171,7 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
     <section class="block">
       <h2>堆叠规则（承重等级）</h2>
       <div class="row" id="levelRules"></div>
-      <p class="hint">规则：货物 A 能叠在货物 B 上 ⟺ B 的承重等级 ≥ A 的等级；地面可放任何货物。<br>默认：纸箱=1，木箱=2，托盘=2，导轨=3 → 纸箱可叠所有；木箱/托盘可互相叠，也可叠导轨；导轨只能落地或叠导轨。</p>
+      <p class="hint">规则：货物 A 能叠在货物 B 上 ⟺ B 的承重等级 ≥ A 的等级；地面可放任何货物。<br>默认：纸箱=1，托盘=2，木箱=3，导轨=4 → 纸箱可叠所有；托盘可叠托盘/木箱/导轨；木箱可叠木箱/导轨（木箱不能叠在托盘上）；导轨只能落地或叠导轨。</p>
     </section>
     <section class="block">
       <h2>模式</h2>
@@ -783,11 +783,18 @@ class Packer {
     container: { L: 589, W: 235, H: 239 },
     cargoDef: [], placed: [], mode: 'auto', selected: null, stepIndex: 0, nextId: 1,
     // 承重等级：A 能叠在 B 上 ⟺ level(B) >= level(A)；地面可放任何货物
-    catLevel: { '纸箱': 1, '木箱': 2, '托盘': 2, '导轨': 3 },
+    // 托盘=2 < 木箱=3：托盘可叠在木箱上，木箱不能叠在托盘上
+    catLevel: { '纸箱': 1, '托盘': 2, '木箱': 3, '导轨': 4 },
   };
   // 货物/类别的承重等级；未识别类别默认 1（最轻）
   function levelOfCat(cat) { return state.catLevel[cat] ?? 1; }
   function levelOfItem(it) { return levelOfCat(it.category); }
+  // 旧默认（木箱2/托盘2/导轨3）无法表达"托盘可叠木箱、木箱不可叠托盘"，读到旧数据时升级为新默认
+  function normalizeCatLevel(lv) {
+    if (!lv) return lv;
+    if (lv['木箱'] === 2 && lv['托盘'] === 2 && lv['导轨'] === 3) return { ...lv, '木箱': 3, '导轨': 4 };
+    return lv;
+  }
   const meshByInst = new Map();
   const unplacedMeshes = new Map(); // 装不下的货物 mesh（放在集装箱外）
 
@@ -1532,7 +1539,7 @@ class Packer {
   // 把某套清单数据加载到界面（表格 + 集装箱 + 等级）
   function applyListData(data) {
     cancelBgPack();
-    if (data.catLevel) { Object.assign(state.catLevel, data.catLevel); renderLevelRules(); }
+    if (data.catLevel) { Object.assign(state.catLevel, normalizeCatLevel(data.catLevel)); renderLevelRules(); }
     if (data.container) {
       state.container = data.container;
       $('cW').value = data.container.L; $('cD').value = data.container.W; $('cH').value = data.container.H;
@@ -1670,7 +1677,7 @@ class Packer {
   // 启动时：优先从 localStorage 读取上次保存的清单；否则用默认示例
   const saved = loadCargoState();
   if (saved && saved.cargoDef) {
-    if (saved.catLevel) { Object.assign(state.catLevel, saved.catLevel); renderLevelRules(); }
+    if (saved.catLevel) { Object.assign(state.catLevel, normalizeCatLevel(saved.catLevel)); renderLevelRules(); }
     if (saved.container) {
       state.container = saved.container;
       $('cW').value = saved.container.L; $('cD').value = saved.container.W; $('cH').value = saved.container.H;
@@ -2069,7 +2076,7 @@ class Packer {
     r.onload = () => {
       try {
         const data = JSON.parse(r.result);
-        if (data.catLevel) { Object.assign(state.catLevel, data.catLevel); renderLevelRules(); }
+        if (data.catLevel) { Object.assign(state.catLevel, normalizeCatLevel(data.catLevel)); renderLevelRules(); }
         state.container = data.container;
         $('cW').value = data.container.L; $('cD').value = data.container.W; $('cH').value = data.container.H;
         buildContainer();
