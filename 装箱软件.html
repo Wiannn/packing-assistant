@@ -150,6 +150,11 @@ input[type=text], input[type=color] { padding: 3px 6px; border: 1px solid #d9dce
         <button id="clearBox" class="btn">清空装箱</button>
       </div>
       <div id="bulkPanel" style="display:none">
+        <div class="row btns" style="margin-bottom:6px">
+          <button id="ocrPick" class="btn">识别图片表格</button>
+          <span id="ocrStatus" class="hint" style="margin-top:0"></span>
+        </div>
+        <input type="file" id="ocrFile" accept="image/*" multiple hidden>
         <textarea id="bulkText" placeholder="从 Excel 直接复制粘贴，或用 Tab / 逗号 / 空格分隔。列顺序：
 名称  类别  长  宽  高  数量  颜色  必装  圆柱
 导轨  导轨  600  20  15  40
@@ -1467,6 +1472,187 @@ class Packer {
       writeBulkRows(parseBulkText($('bulkText').value), true);
     }
   };
+  // ===== 图片表格识别：本地 OCR → 「序号,类别,长,宽,高,数量」CSV =====
+  // 图片只在本机浏览器处理，不上传服务器；首次使用需联网下载识别引擎与中文模型
+  const OCR_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+  let ocrWorker = null, ocrEngineLoading = null, ocrBusy = false;
+  function ocrStatus(msg) { $('ocrStatus').textContent = msg || ''; }
+  function ocrLoadEngine() {
+    if (window.Tesseract) return Promise.resolve();
+    if (ocrEngineLoading) return ocrEngineLoading;
+    ocrEngineLoading = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = OCR_CDN;
+      s.onload = () => resolve();
+      s.onerror = () => { ocrEngineLoading = null; reject(new Error('识别引擎下载失败，请检查网络后重试')); };
+      document.head.appendChild(s);
+    });
+    return ocrEngineLoading;
+  }
+  async function ocrEnsureWorker() {
+    if (ocrWorker) return ocrWorker;
+    await ocrLoadEngine();
+    ocrStatus('正在加载中文识别模型（首次需联网下载，约 10-30 秒）…');
+    ocrWorker = await Tesseract.createWorker('chi_sim+eng', 1, {
+      logger: m => { if (m.status) ocrStatus('识别引擎：' + m.status + (m.progress ? ' ' + Math.round(m.progress * 100) + '%' : '')); }
+    });
+    return ocrWorker;
+  }
+  // 放大 + 灰度 + Otsu 二值化 + 去掉表格长横线/竖线，提升截图表格的识别率
+  function ocrPreprocess(img) {
+    const scale = Math.min(5, Math.max(1, Math.round(1600 / Math.max(1, img.width))));
+    const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+    const g = cv.getContext('2d');
+    g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+    g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+    g.drawImage(img, 0, 0, w, h);
+    const id = g.getImageData(0, 0, w, h), d = id.data, n = w * h;
+    const gray = new Uint8Array(n), hist = new Array(256).fill(0);
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const v = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0;
+      gray[p] = v; hist[v]++;
+    }
+    // Otsu 求阈值；上限压到 175，避免干净截图被过度加粗（会把 5 读成 9）
+    let sum = 0; for (let v = 0; v < 256; v++) sum += v * hist[v];
+    let sumB = 0, wB = 0, best = -1, thr = 160;
+    for (let v = 0; v < 256; v++) {
+      wB += hist[v]; if (!wB) continue;
+      const wF = n - wB; if (!wF) break;
+      sumB += v * hist[v];
+      const mB = sumB / wB, mF = (sum - sumB) / wF, between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > best) { best = between; thr = v; }
+    }
+    // 白底截图/文档固定用 170：实测比 Otsu（约 161）笔画更完整，中文与 * 号识别明显更准；照片则用 Otsu
+    let whiteCnt = 0; for (let v = 245; v < 256; v++) whiteCnt += hist[v];
+    thr = (whiteCnt / n > 0.35) ? 170 : thr;
+    const bin = new Uint8Array(n);
+    for (let p = 0; p < n; p++) bin[p] = gray[p] < thr ? 1 : 0;
+    for (let y = 0; y < h; y++) {
+      let c = 0; for (let x = 0; x < w; x++) c += bin[y * w + x];
+      if (c > w * 0.6) for (let x = 0; x < w; x++) bin[y * w + x] = 0;
+    }
+    for (let x = 0; x < w; x++) {
+      let c = 0; for (let y = 0; y < h; y++) c += bin[y * w + x];
+      if (c > h * 0.6) for (let y = 0; y < h; y++) bin[y * w + x] = 0;
+    }
+    for (let i = 0, p = 0; p < n; i += 4, p++) {
+      const v = bin[p] ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+    }
+    g.putImageData(id, 0, 0);
+    return cv;
+  }
+  function ocrWords(data) {
+    if (Array.isArray(data.words) && data.words.length) return data.words;
+    const out = [];
+    (data.blocks || []).forEach(b => (b.paragraphs || []).forEach(p => (p.lines || []).forEach(l => (l.words || []).forEach(w => out.push(w)))));
+    return out;
+  }
+  // 按 y 聚合为行，行内按 x 排序
+  function ocrLines(words, H) {
+    const tol = Math.max(8, H * 0.0045);
+    const ws = words.filter(w => w.text && w.text.trim());
+    ws.sort((a, b) => (a.bbox.y0 + a.bbox.y1) / 2 - (b.bbox.y0 + b.bbox.y1) / 2 || a.bbox.x0 - b.bbox.x0);
+    const grp = [];
+    for (const w of ws) {
+      const cy = (w.bbox.y0 + w.bbox.y1) / 2;
+      const last = grp[grp.length - 1];
+      if (last && Math.abs(cy - last.y) < tol) { last.words.push(w); last.y = (last.y + cy) / 2; }
+      else grp.push({ y: cy, words: [w] });
+    }
+    return grp.map(l => {
+      l.words.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+      return { y: l.y, x: l.words[0].bbox.x0, text: l.words.map(w => w.text).join(' ') };
+    });
+  }
+  const OCR_SIZE_RE = /(\d+(?:\.\d+)?)\s*[*xX×%]\s*(\d+(?:\.\d+)?)\s*[*xX×%]\s*(\d+(?:\.\d+)?)/;
+  // OCR 常把 130.0 读成 1300（丢小数点）：4 位纯数字按 x.y 还原
+  const ocrFixDim = s => (!s.includes('.') && s.length === 4) ? s.slice(0, 3) + '.' + s.slice(3) : s;
+  // 模板解析：左列序号 + 其下方（到下一个序号前）的尺寸/包装/件数行
+  function ocrParseTable(lines, W) {
+    const idx = [], dat = [], warns = [];
+    lines.forEach(ln => {
+      if (/合计|总计|小计/.test(ln.text)) return; // 不要合计行
+      const m = ln.text.match(OCR_SIZE_RE);
+      if (m) { dat.push({ y: ln.y, text: ln.text, m }); return; }
+      if (ln.x < W * 0.18) {
+        const im = ln.text.match(/^(\d{1,3})(?:\s|$)/);
+        if (im && +im[1] > 0) idx.push({ y: ln.y, no: +im[1] });
+      }
+    });
+    idx.sort((a, b) => a.y - b.y);
+    const rows = [];
+    idx.forEach((ix, k) => {
+      const y1 = k + 1 < idx.length ? idx[k + 1].y : Infinity;
+      const band = dat.filter(d => d.y > ix.y && d.y < y1);
+      if (!band.length) { warns.push('序号 ' + ix.no + ' 未识别到尺寸'); return; }
+      band.forEach(d => {
+        const [, a, b, c] = d.m;
+        const l = Number(ocrFixDim(a)), w = Number(ocrFixDim(b)), h = Number(ocrFixDim(c));
+        const rest = d.text.replace(d.m[0], ' ');
+        const nums = rest.match(/\d+/g) || [];
+        const qty = nums.length ? parseInt(nums[nums.length - 1], 10) : 0;
+        const pkg = (rest.replace(/\d+/g, ' ').match(/[\u4e00-\u9fa5]+/g) || []).join('');
+        let category;
+        if (/托/.test(pkg)) category = '托盘';
+        else if (/木/.test(pkg)) category = '木箱';
+        else if (/纸/.test(pkg)) category = '纸箱';
+        else if (/导|轨|捆|擂/.test(pkg)) category = '导轨'; // 打捆的长料按导轨处理（OCR 常把「捆」读成「擂」）
+        else if (pkg === '件') category = '件';           // 交给批量解析提示「类别未识别」
+        else { category = '纸箱'; warns.push('序号 ' + ix.no + ' 包装识别不清，按纸箱处理'); }
+        if (!(l > 0 && w > 0 && h > 0)) { warns.push('序号 ' + ix.no + ' 尺寸识别失败'); return; }
+        if (l > 700 || w > 400 || h > 400) warns.push('序号 ' + ix.no + ' 尺寸（' + l + '*' + w + '*' + h + '）疑似识别错误');
+        if (!(qty > 0)) warns.push('序号 ' + ix.no + ' 件数识别失败，按 1 处理');
+        rows.push({ no: ix.no, category, l, w, h, qty: qty > 0 ? qty : 1 });
+      });
+    });
+    return { rows, warns };
+  }
+  async function ocrRunFiles(files) {
+    ocrBusy = true; $('ocrPick').disabled = true;
+    const all = [], warns = [];
+    try {
+      await ocrEnsureWorker();
+      for (let i = 0; i < files.length; i++) {
+        ocrStatus('正在识别第 ' + (i + 1) + '/' + files.length + ' 张…');
+        const url = URL.createObjectURL(files[i]);
+        try {
+          const img = new Image();
+          img.src = url;
+          await img.decode();
+          const cv = ocrPreprocess(img);
+          const { data } = await ocrWorker.recognize(cv);
+          const r = ocrParseTable(ocrLines(ocrWords(data), cv.height), cv.width);
+          all.push(...r.rows); warns.push(...r.warns);
+        } finally { URL.revokeObjectURL(url); }
+      }
+      if (!all.length) {
+        ocrStatus('没有识别到表格数据，请换一张更清晰的图片');
+        $('bulkResult').textContent = '图片识别失败：没有识别到「序号 + 尺寸 + 包装 + 件数」结构，请确认图片与示例格式一致。';
+        return;
+      }
+      const csv = ['序号,类别,长,宽,高,数量'].concat(all.map(r => [r.no, r.category, r.l, r.w, r.h, r.qty].join(','))).join('\n');
+      $('bulkText').value = csv;
+      $('bulkPanel').style.display = 'block';
+      renderBulkPreview(parseBulkText(csv));
+      $('bulkResult').textContent = '图片识别 ' + all.length + ' 行' +
+        (warns.length ? '；需核对：' + warns.slice(0, 5).join('；') + (warns.length > 5 ? ' 等 ' + warns.length + ' 处' : '') : '') +
+        '。请核对预览后点「追加到清单」。';
+      ocrStatus('识别完成：' + all.length + ' 行');
+    } catch (e) {
+      ocrStatus('识别失败：' + e.message);
+      $('bulkResult').textContent = '图片识别失败：' + e.message;
+    } finally {
+      ocrBusy = false; $('ocrPick').disabled = false;
+    }
+  }
+  $('ocrPick').onclick = () => { if (!ocrBusy) $('ocrFile').click(); };
+  $('ocrFile').onchange = () => {
+    const files = Array.from($('ocrFile').files || []);
+    $('ocrFile').value = '';
+    if (files.length) ocrRunFiles(files);
+  };
+
   // ---- 承重等级面板 ----
   function renderLevelRules() {
     $('levelRules').innerHTML = Object.keys(state.catLevel).map(cat =>
