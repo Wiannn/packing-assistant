@@ -1368,7 +1368,7 @@ class Packer {
         const sp = raw.split(/\s+/).filter(Boolean);
         if (sp.length >= 6 && [2, 3, 4].every(i => /^\d+(\.\d+)?$/.test(normCell(sp[i])))) cells = sp.map(normCell);
       }
-      if (/^(名称|name|货名)$/i.test(cells[0] || '')) return; // 跳过表头行
+      if (/^(序号|编号|no\.?|名称|name|货名)$/i.test(cells[0] || '')) return; // 跳过表头行（如 序号,类别,长,宽,高,数量）
       const [nameRaw, catRaw, lRaw, wRaw, hRaw, qRaw, colorRaw, mustRaw, cylRaw] = cells;
       const errs = [], warns = [];
       const row = { line: idx + 1, name: nameRaw || '', category: '纸箱', l: 0, w: 0, h: 0, innerD: 0, qty: 1, color: '', mustLoad: false, isCylinder: false, errs, warns };
