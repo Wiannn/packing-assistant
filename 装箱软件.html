@@ -789,10 +789,10 @@ class Packer {
   // 货物/类别的承重等级；未识别类别默认 1（最轻）
   function levelOfCat(cat) { return state.catLevel[cat] ?? 1; }
   function levelOfItem(it) { return levelOfCat(it.category); }
-  // 旧默认（木箱2/托盘2/导轨3）无法表达"托盘可叠木箱、木箱不可叠托盘"，读到旧数据时升级为新默认
+  // 旧默认（木箱2/导轨3，早期数据还没有"托盘"这一项）无法表达"托盘可叠木箱、木箱不可叠托盘"，读到旧数据时升级为新默认
   function normalizeCatLevel(lv) {
     if (!lv) return lv;
-    if (lv['木箱'] === 2 && lv['托盘'] === 2 && lv['导轨'] === 3) return { ...lv, '木箱': 3, '导轨': 4 };
+    if (lv['木箱'] === 2 && lv['导轨'] === 3) return { ...lv, '托盘': lv['托盘'] ?? 2, '木箱': 3, '导轨': 4 };
     return lv;
   }
   const meshByInst = new Map();
